@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 
 from model.gpt import GPT
+from utils.profiler import ExecutionTimer
 from utils.tokenizer import GPT2Tokenizer
 
 
@@ -46,34 +47,37 @@ def generate(
     
     # ===== AUTOREGRESSIVE GENERATION LOOP =====
     
+    ttft = None
+    itl_times = []
+
     with torch.no_grad():
-        # Generate tokens one at a time
-        for _ in range(max_tokens):
-            # Get current sequence length
-            # sequence: (1, current_seq_len)
-            current_seq_len = sequence.shape[1]
-            
-            # Forward pass through the model
-            # (1, current_seq_len) -> (1, current_seq_len, vocab_size)
+        # Measure the first forward pass separately for TTFT.
+        with ExecutionTimer() as timer:
             logits = model(sequence)
-            
-            # Extract logits for the last token position
-            # (1, current_seq_len, vocab_size) -> (1, vocab_size)
-            last_token_logits = logits[:, -1, :]
-            
-            # Greedy sampling: take the token with highest probability
-            # argmax over vocabulary dimension (dim=-1)
-            # (1, vocab_size) -> (1, 1)
-            next_token_id = torch.argmax(last_token_logits, dim=-1, keepdim=True)
-            
-            # Append the generated token to the sequence
-            # (1, current_seq_len) + (1, 1) -> (1, current_seq_len + 1)
-            sequence = torch.cat([sequence, next_token_id], dim=1)
-            
-            # Check stopping condition: End-of-text token ID is 50256 in GPT-2
-            if next_token_id.item() == 50256:
-                print("Generated [END] token")
-                break
+
+        ttft = timer.elapsed
+        last_token_logits = logits[:, -1, :]
+        next_token_id = torch.argmax(last_token_logits, dim=-1, keepdim=True)
+        sequence = torch.cat([sequence, next_token_id], dim=1)
+
+        print(f"TTFT (Time to First Token): {ttft:.6f} seconds")
+
+        if next_token_id.item() == 50256:
+            print("Generated [END] token")
+        else:
+            # Measure each subsequent forward pass as ITL.
+            for _ in range(max_tokens - 1):
+                with ExecutionTimer() as timer:
+                    logits = model(sequence)
+
+                itl_times.append(timer.elapsed)
+                last_token_logits = logits[:, -1, :]
+                next_token_id = torch.argmax(last_token_logits, dim=-1, keepdim=True)
+                sequence = torch.cat([sequence, next_token_id], dim=1)
+
+                if next_token_id.item() == 50256:
+                    print("Generated [END] token")
+                    break
     
     # ===== DECODE OUTPUT =====
     
@@ -84,6 +88,12 @@ def generate(
     # Decode all tokens to text
     # List[int] -> str
     generated_text = tokenizer.decode(generated_token_ids)
+
+    if itl_times:
+        average_itl = sum(itl_times) / len(itl_times)
+        print(f"Average ITL (Inter-Token Latency): {average_itl:.6f} seconds")
+    else:
+        print("Average ITL (Inter-Token Latency): N/A (no subsequent tokens generated)")
     
     return generated_text
 
