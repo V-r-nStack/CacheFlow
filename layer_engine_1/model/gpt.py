@@ -1,289 +1,152 @@
 import torch
 import torch.nn as nn
+
 from .blocks import TransformerBlock
 
 
 class GPT(nn.Module):
-    """
-    GPT language model with causal self-attention.
-    
-    Architecture:
-        - Token embeddings
-        - Position embeddings (absolute positioning)
-        - Stack of transformer blocks with Pre-Norm attention
-        - Final layer normalization
-        - Language model head for next-token prediction
-    """
-    
+    """Decoder-only GPT-2 backbone."""
+
     def __init__(self, vocab_size, max_seq_len, dim, num_heads, num_layers, dropout=0.0):
-        """
-        Initialize GPT model.
-        
-        Args:
-            vocab_size: Size of vocabulary
-            max_seq_len: Maximum sequence length for position embeddings
-            dim: Model dimension (embedding and hidden dimension)
-            num_heads: Number of attention heads
-            num_layers: Number of transformer blocks
-            dropout: Dropout probability
-        """
+        """Build embeddings, blocks, and output head."""
         super().__init__()
-        
+
         self.vocab_size = vocab_size
         self.max_seq_len = max_seq_len
         self.dim = dim
         self.num_heads = num_heads
         self.num_layers = num_layers
-        
-        # ===== EMBEDDINGS =====
-        
-        # Token embeddings: map token IDs to dense vectors
-        # Shape: (vocab_size, dim)
+
+        # Token embeddings: (V, C)
         self.token_emb = nn.Embedding(vocab_size, dim)
-        
-        # Position embeddings: absolute positional encoding
-        # Shape: (max_seq_len, dim)
+
+        # Absolute positions: (T, C)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
-        
-        # Dropout applied to embedding sums
+
         self.emb_dropout = nn.Dropout(dropout)
-        
-        # ===== TRANSFORMER BLOCKS =====
-        
-        # Stack of transformer blocks
-        self.blocks = nn.ModuleList([
-            TransformerBlock(dim, num_heads, dropout=dropout)
-            for _ in range(num_layers)
-        ])
-        
-        # ===== OUTPUT LAYER =====
-        
-        # Final layer normalization before language model head
+
+        # Decoder stack.
+        self.blocks = nn.ModuleList(
+            [TransformerBlock(dim, num_heads, dropout=dropout) for _ in range(num_layers)]
+        )
+
+        # Final norm before logits.
         self.final_norm = nn.LayerNorm(dim)
-        
-        # Language model head: project back to vocabulary size for next-token logits
-        # Input: (batch_size, seq_len, dim), Output: (batch_size, seq_len, vocab_size)
+
+        # (B, T, C) -> (B, T, V)
         self.lm_head = nn.Linear(dim, vocab_size)
-    
+
     def forward(self, token_ids):
-        """
-        Forward pass of GPT model.
-        
-        Args:
-            token_ids: Token IDs tensor of shape (batch_size, seq_len)
-            
-        Returns:
-            Logits tensor of shape (batch_size, seq_len, vocab_size)
-        """
-        
-        # Get sequence length from input
-        # token_ids: (batch_size, seq_len)
+        """Return per-token logits for the full context."""
         batch_size, seq_len = token_ids.shape
-        
-        # ===== TOKEN AND POSITION EMBEDDINGS =====
-        
-        # Look up token embeddings
-        # (batch_size, seq_len) -> (batch_size, seq_len, dim)
+
+        # Token lookup.
         token_embeds = self.token_emb(token_ids)
-        
-        # Create position indices [0, 1, 2, ..., seq_len-1]
-        # (seq_len,)
+
+        # Position ids are broadcast across batch.
         pos_ids = torch.arange(seq_len, device=token_ids.device, dtype=torch.long)
-        
-        # Look up position embeddings
-        # (seq_len,) -> (seq_len, dim)
         pos_embeds = self.pos_emb(pos_ids)
-        
-        # Add token and position embeddings
-        # (batch_size, seq_len, dim) + (seq_len, dim) -> (batch_size, seq_len, dim) [broadcasting]
+
+        # (B, T, C) + (T, C) -> (B, T, C)
         x = token_embeds + pos_embeds
-        
-        # Apply dropout to embeddings
-        # (batch_size, seq_len, dim) -> (batch_size, seq_len, dim)
         x = self.emb_dropout(x)
-        
-        # ===== TRANSFORMER BLOCKS =====
-        
-        # Pass through stack of transformer blocks
+
         for block in self.blocks:
-            # Each block: (batch_size, seq_len, dim) -> (batch_size, seq_len, dim)
             x = block(x)
-        
-        # ===== OUTPUT PROJECTION =====
-        
-        # Apply final layer normalization
-        # (batch_size, seq_len, dim) -> (batch_size, seq_len, dim)
+
         x = self.final_norm(x)
-        
-        # Project to vocabulary size for next-token prediction
-        # (batch_size, seq_len, dim) -> (batch_size, seq_len, vocab_size)
         logits = self.lm_head(x)
-        
+
         return logits
-    
+
     @classmethod
     def load_pretrained_weights(cls, model, state_dict_path):
-        """
-        Load pretrained weights from HuggingFace GPT-2 state dict.
-        
-        Maps HuggingFace GPT-2 parameter names and shapes to this custom model's architecture.
-        Handles Conv1D weight transposition (HF uses Conv1D with (in_features, out_features) layout,
-        PyTorch nn.Linear expects (out_features, in_features)).
-        
-        HuggingFace GPT-2 structure:
-            transformer.wte.weight → token embeddings
-            transformer.wpe.weight → position embeddings
-            transformer.h.{i}.ln_1.weight/bias → attention pre-norm
-            transformer.h.{i}.attn.c_attn.weight/bias → attention Q,K,V projection (Conv1D)
-            transformer.h.{i}.attn.c_proj.weight/bias → attention output projection (Conv1D)
-            transformer.h.{i}.ln_2.weight/bias → FFN pre-norm
-            transformer.h.{i}.mlp.c_fc.weight/bias → FFN expand (Conv1D)
-            transformer.h.{i}.mlp.c_proj.weight/bias → FFN contract (Conv1D)
-            transformer.ln_f.weight/bias → final layer norm
-            lm_head.weight → language model head
-        
-        Custom model structure:
-            token_emb.weight → token embeddings
-            pos_emb.weight → position embeddings
-            blocks.{i}.norm_attn.weight/bias → attention pre-norm
-            blocks.{i}.attention.linear_qkv.weight/bias → attention Q,K,V
-            blocks.{i}.attention.linear_out.weight/bias → attention output
-            blocks.{i}.norm_ffn.weight/bias → FFN pre-norm
-            blocks.{i}.ffn.linear_expand.weight/bias → FFN expand
-            blocks.{i}.ffn.linear_contract.weight/bias → FFN contract
-            final_norm.weight/bias → final layer norm
-            lm_head.weight → language model head
-        
-        Args:
-            model: GPT model instance to load weights into
-            state_dict_path: Path to HuggingFace GPT-2 state_dict file (.pt)
-        
-        Returns:
-            None (modifies model in-place)
-        """
-        
-        # Load the pretrained state dict
+        """Map a GPT-2 state dict into this module layout."""
         pretrained_state = torch.load(state_dict_path, map_location='cpu')
-        
-        # Detect key format: check if keys have 'transformer.' prefix or not
         has_transformer_prefix = any(k.startswith('transformer.') for k in pretrained_state.keys())
-        
-        # Helper function to get key with correct prefix
-        def get_key(base_key):
-            if has_transformer_prefix:
-                prefixed_key = f'transformer.{base_key}'
-            else:
-                prefixed_key = base_key
-            return prefixed_key if prefixed_key in pretrained_state else None
-        
-        # Initialize new state dict for custom model
+
+        def resolve_key(base_key):
+            key = f'transformer.{base_key}' if has_transformer_prefix else base_key
+            return key if key in pretrained_state else None
+
         model_state = {}
-        
-        # ===== EMBEDDING WEIGHTS =====
-        
-        # Token embeddings: direct copy
-        wte_key = get_key('wte.weight')
+
+        wte_key = resolve_key('wte.weight')
         if wte_key:
             model_state['token_emb.weight'] = pretrained_state[wte_key]
-        
-        # Position embeddings: direct copy
-        wpe_key = get_key('wpe.weight')
+
+        wpe_key = resolve_key('wpe.weight')
         if wpe_key:
             model_state['pos_emb.weight'] = pretrained_state[wpe_key]
-        
-        # ===== TRANSFORMER BLOCKS =====
-        
+
+        block_prefix = 'transformer.h.' if has_transformer_prefix else 'h.'
+
         for layer_idx in range(model.num_layers):
-            hf_prefix = f'h.{layer_idx}' if not has_transformer_prefix else f'transformer.h.{layer_idx}'
+            hf_prefix = f'{block_prefix}{layer_idx}'
             custom_prefix = f'blocks.{layer_idx}'
-            
-            # ===== ATTENTION LAYER NORM =====
-            
+
             ln1_w_key = f'{hf_prefix}.ln_1.weight'
             ln1_b_key = f'{hf_prefix}.ln_1.bias'
             if ln1_w_key in pretrained_state:
                 model_state[f'{custom_prefix}.norm_attn.weight'] = pretrained_state[ln1_w_key]
             if ln1_b_key in pretrained_state:
                 model_state[f'{custom_prefix}.norm_attn.bias'] = pretrained_state[ln1_b_key]
-            
-            # ===== ATTENTION PROJECTIONS =====
-            
+
             c_attn_w_key = f'{hf_prefix}.attn.c_attn.weight'
             c_attn_b_key = f'{hf_prefix}.attn.c_attn.bias'
             if c_attn_w_key in pretrained_state:
-                c_attn_weight = pretrained_state[c_attn_w_key]
-                model_state[f'{custom_prefix}.attention.linear_qkv.weight'] = c_attn_weight.T
-            
+                # Conv1D -> Linear: transpose weight layout.
+                model_state[f'{custom_prefix}.attention.linear_qkv.weight'] = pretrained_state[c_attn_w_key].T
             if c_attn_b_key in pretrained_state:
                 model_state[f'{custom_prefix}.attention.linear_qkv.bias'] = pretrained_state[c_attn_b_key]
-            
-            # Attention output projection
+
             c_proj_w_key = f'{hf_prefix}.attn.c_proj.weight'
             c_proj_b_key = f'{hf_prefix}.attn.c_proj.bias'
             if c_proj_w_key in pretrained_state:
-                c_proj_weight = pretrained_state[c_proj_w_key]
-                model_state[f'{custom_prefix}.attention.linear_out.weight'] = c_proj_weight.T
-            
+                # Conv1D -> Linear: transpose weight layout.
+                model_state[f'{custom_prefix}.attention.linear_out.weight'] = pretrained_state[c_proj_w_key].T
             if c_proj_b_key in pretrained_state:
                 model_state[f'{custom_prefix}.attention.linear_out.bias'] = pretrained_state[c_proj_b_key]
-            
-            # ===== FFN LAYER NORM =====
-            
+
             ln2_w_key = f'{hf_prefix}.ln_2.weight'
             ln2_b_key = f'{hf_prefix}.ln_2.bias'
             if ln2_w_key in pretrained_state:
                 model_state[f'{custom_prefix}.norm_ffn.weight'] = pretrained_state[ln2_w_key]
             if ln2_b_key in pretrained_state:
                 model_state[f'{custom_prefix}.norm_ffn.bias'] = pretrained_state[ln2_b_key]
-            
-            # ===== FFN PROJECTIONS =====
-            
+
             c_fc_w_key = f'{hf_prefix}.mlp.c_fc.weight'
             c_fc_b_key = f'{hf_prefix}.mlp.c_fc.bias'
             if c_fc_w_key in pretrained_state:
-                c_fc_weight = pretrained_state[c_fc_w_key]
-                model_state[f'{custom_prefix}.ffn.linear_expand.weight'] = c_fc_weight.T
-            
+                # Conv1D -> Linear: transpose weight layout.
+                model_state[f'{custom_prefix}.ffn.linear_expand.weight'] = pretrained_state[c_fc_w_key].T
             if c_fc_b_key in pretrained_state:
                 model_state[f'{custom_prefix}.ffn.linear_expand.bias'] = pretrained_state[c_fc_b_key]
-            
+
             mlp_proj_w_key = f'{hf_prefix}.mlp.c_proj.weight'
             mlp_proj_b_key = f'{hf_prefix}.mlp.c_proj.bias'
             if mlp_proj_w_key in pretrained_state:
-                c_proj_weight = pretrained_state[mlp_proj_w_key]
-                model_state[f'{custom_prefix}.ffn.linear_contract.weight'] = c_proj_weight.T
-            
+                # Conv1D -> Linear: transpose weight layout.
+                model_state[f'{custom_prefix}.ffn.linear_contract.weight'] = pretrained_state[mlp_proj_w_key].T
             if mlp_proj_b_key in pretrained_state:
                 model_state[f'{custom_prefix}.ffn.linear_contract.bias'] = pretrained_state[mlp_proj_b_key]
-        
-        # ===== FINAL OUTPUT LAYER =====
-        
-        # Final layer normalization
-        ln_f_w_key = get_key('ln_f.weight')
-        ln_f_b_key = get_key('ln_f.bias')
+
+        ln_f_w_key = resolve_key('ln_f.weight')
+        ln_f_b_key = resolve_key('ln_f.bias')
         if ln_f_w_key:
             model_state['final_norm.weight'] = pretrained_state[ln_f_w_key]
         if ln_f_b_key:
             model_state['final_norm.bias'] = pretrained_state[ln_f_b_key]
-        
-        # Language model head: weight tying with token embeddings (as in HF GPT-2)
-        # In HF, lm_head.weight and wte.weight are the same tensor (tied weights)
-        # To replicate this, we load lm_head weight directly and then tie it
-        if 'lm_head.weight' in pretrained_state:
-            model_state['lm_head.weight'] = pretrained_state['lm_head.weight']
-        else:
-            # If lm_head.weight not found, tie it to token embeddings
-            # (this matches HF's weight tying strategy)
-            model_state['lm_head.weight'] = pretrained_state[get_key('wte.weight')] if get_key('wte.weight') else None
-        
-        # Load the mapped weights into the model
+
+        lm_head_key = resolve_key('lm_head.weight')
+        if lm_head_key:
+            model_state['lm_head.weight'] = pretrained_state[lm_head_key]
+        elif wte_key:
+            model_state['lm_head.weight'] = pretrained_state[wte_key]
+
         model.load_state_dict(model_state, strict=False)
-        
-        # ===== WEIGHT TYING =====
-        # Tie lm_head weights to token embeddings (as HuggingFace does)
-        # This reduces parameters and improves model efficiency
         model.lm_head.weight = model.token_emb.weight
-        
+
         print(f"Loaded pretrained weights from {state_dict_path}")
         print(f"Loaded {len(model_state)} parameters")
-        print(f"Tied lm_head.weight to token_emb.weight (weight tying)")
+        print("Tied lm_head.weight to token_emb.weight (weight tying)")

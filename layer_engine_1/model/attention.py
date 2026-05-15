@@ -3,135 +3,76 @@ import torch.nn as nn
 
 
 class CausalMultiHeadAttention(nn.Module):
-    """
-    Multi-head causal self-attention mechanism.
-    
-    Implements scaled dot-product attention with:
-    - Single linear layer for Q, K, V projections
-    - Manual head splitting using .view() and .transpose()
-    - Explicit causal masking using torch.tril
-    """
+    """Causal multi-head self-attention."""
     
     def __init__(self, dim, num_heads, dropout=0.0):
-        """
-        Initialize the multi-head attention layer.
-        
-        Args:
-            dim: Embedding/model dimension
-            num_heads: Number of attention heads
-            dropout: Dropout probability for attention weights
-        """
+        """Initialize the attention projection stack."""
         super().__init__()
         assert dim % num_heads == 0, f"dim ({dim}) must be divisible by num_heads ({num_heads})"
         
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5  # Scaling factor for attention scores
+        self.scale = self.head_dim ** -0.5  # 1/sqrt(d_k)
         
-        # Single linear projection for all Q, K, V
-        # Input: dim, Output: 3*dim (concatenated Q, K, V)
+        # QKV projection: (B, T, C) -> (B, T, 3C)
         self.linear_qkv = nn.Linear(dim, 3 * dim)
         
-        # Output projection after attention
+        # Output projection.
         self.linear_out = nn.Linear(dim, dim)
         
-        # Dropout applied to attention weights
+        # Attention weight dropout.
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
-        """
-        Forward pass of causal multi-head attention.
-        
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, dim)
-            
-        Returns:
-            Output tensor of shape (batch_size, seq_len, dim)
-        """
-        # Get input dimensions
-        # x: (batch_size, seq_len, dim)
+        """Apply masked attention over the full sequence."""
         batch_size, seq_len, dim = x.shape
         
-        # ===== PROJECT TO Q, K, V =====
-        
-        # Single linear layer produces concatenated Q, K, V
-        # (batch_size, seq_len, dim) -> (batch_size, seq_len, 3*dim)
+        # (B, T, C) -> (B, T, 3C)
         qkv = self.linear_qkv(x)
-        
-        # Reshape to separate Q, K, V and split into heads
-        # (batch_size, seq_len, 3*dim) -> (batch_size, seq_len, 3, num_heads, head_dim)
+
+        # Split heads: (B, T, 3C) -> (B, T, 3, H, D)
         qkv = qkv.reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
-        
-        # Rearrange dimensions for easier head processing
-        # (batch_size, seq_len, 3, num_heads, head_dim) -> (3, batch_size, num_heads, seq_len, head_dim)
+
+        # (B, T, 3, H, D) -> (3, B, H, T, D)
         qkv = qkv.permute(2, 0, 3, 1, 4)
-        
-        # Unpack Q, K, V (each has shape: batch_size, num_heads, seq_len, head_dim)
+
+        # Each: (B, H, T, D)
         q, k, v = qkv[0], qkv[1], qkv[2]
-        
-        # ===== COMPUTE ATTENTION SCORES =====
-        
-        # Matrix multiplication: Q @ K^T
-        # (batch_size, num_heads, seq_len, head_dim) @ (batch_size, num_heads, head_dim, seq_len)
-        # -> (batch_size, num_heads, seq_len, seq_len)
+
+        # (B, H, T, D) x (B, H, D, T) -> (B, H, T, T)
         scores = torch.matmul(q, k.transpose(-2, -1))
-        
-        # Scale scores by sqrt(head_dim)
-        # (batch_size, num_heads, seq_len, seq_len) * scale
-        # -> (batch_size, num_heads, seq_len, seq_len)
+
+        # Scale by 1/sqrt(d_k).
         scores = scores * self.scale
-        
-        # ===== APPLY CAUSAL MASK =====
-        
-        # Create lower triangular causal mask (allows attending to past and current)
-        # torch.tril creates lower triangular matrix with 1s where allowed
-        # (seq_len, seq_len) with dtype=bool
+
+        # Causal mask prevents future-token leakage.
         causal_mask = torch.tril(
             torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
         )
-        
-        # Apply mask: set scores at masked (future) positions to -inf
-        # masked_fill(~causal_mask, ...) means "where mask is False (upper triangle), fill with -inf"
-        # (batch_size, num_heads, seq_len, seq_len)
+
+        # Mask upper triangle before softmax.
         scores = scores.masked_fill(~causal_mask, float('-inf'))
-        
-        # ===== COMPUTE ATTENTION WEIGHTS =====
-        
-        # Apply softmax across the key dimension (last dimension)
-        # Softmax will convert -inf to 0 automatically
-        # (batch_size, num_heads, seq_len, seq_len) -> (batch_size, num_heads, seq_len, seq_len)
+
+        # Softmax over keys.
         attn_weights = torch.softmax(scores, dim=-1)
-        
-        # Apply dropout to attention weights
-        # (batch_size, num_heads, seq_len, seq_len) -> (batch_size, num_heads, seq_len, seq_len)
+
+        # Training-time only.
         attn_weights = self.dropout(attn_weights)
-        
-        # ===== APPLY ATTENTION TO VALUES =====
-        
-        # Weighted sum of values
-        # (batch_size, num_heads, seq_len, seq_len) @ (batch_size, num_heads, seq_len, head_dim)
-        # -> (batch_size, num_heads, seq_len, head_dim)
+
+        # (B, H, T, T) x (B, H, T, D) -> (B, H, T, D)
         out = torch.matmul(attn_weights, v)
-        
-        # ===== CONCATENATE HEADS =====
-        
-        # Transpose to get heads adjacent for view() operation
-        # (batch_size, num_heads, seq_len, head_dim) -> (batch_size, seq_len, num_heads, head_dim)
+
+        # (B, H, T, D) -> (B, T, H, D)
         out = out.transpose(1, 2)
-        
-        # Ensure tensor is contiguous in memory before view()
-        # (batch_size, seq_len, num_heads, head_dim) -> (batch_size, seq_len, num_heads, head_dim)
+
+        # view() requires contiguous layout.
         out = out.contiguous()
-        
-        # Concatenate all heads by flattening last two dimensions
-        # (batch_size, seq_len, num_heads, head_dim) -> (batch_size, seq_len, dim)
+
+        # (B, T, H, D) -> (B, T, C)
         out = out.view(batch_size, seq_len, dim)
-        
-        # ===== OUTPUT PROJECTION =====
-        
-        # Final linear transformation
-        # (batch_size, seq_len, dim) -> (batch_size, seq_len, dim)
+
+        # Output projection.
         out = self.linear_out(out)
         
         return out
