@@ -1,6 +1,24 @@
 import torch
 import torch.nn as nn
+import math
 from .attention import CausalMultiHeadAttention
+
+
+class NewGELUActivation(nn.Module):
+    """
+    NewGELU activation function as used in OpenAI GPT and Google BERT.
+    
+    Implementation from HuggingFace transformers library.
+    This is the GELU tanh-based approximation, not PyTorch's standard GELU.
+    
+    Formula: 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    """
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        cdf = 0.5 * (1.0 + torch.tanh(
+            math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))
+        ))
+        return input * cdf
 
 
 class FeedForward(nn.Module):
@@ -27,8 +45,9 @@ class FeedForward(nn.Module):
         # First linear layer: project to expanded dimension
         self.linear_expand = nn.Linear(dim, self.hidden_dim)
         
-        # Activation function
-        self.gelu = nn.GELU()
+        # Activation function: use NewGELU (tanh approximation) to match HF GPT-2 exactly
+        # HuggingFace GPT-2 uses the GELU tanh approximation, NOT PyTorch's nn.GELU()
+        self.gelu = NewGELUActivation()
         
         # Dropout after activation
         self.dropout = nn.Dropout(dropout)

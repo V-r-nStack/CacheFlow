@@ -165,101 +165,125 @@ class GPT(nn.Module):
         # Load the pretrained state dict
         pretrained_state = torch.load(state_dict_path, map_location='cpu')
         
+        # Detect key format: check if keys have 'transformer.' prefix or not
+        has_transformer_prefix = any(k.startswith('transformer.') for k in pretrained_state.keys())
+        
+        # Helper function to get key with correct prefix
+        def get_key(base_key):
+            if has_transformer_prefix:
+                prefixed_key = f'transformer.{base_key}'
+            else:
+                prefixed_key = base_key
+            return prefixed_key if prefixed_key in pretrained_state else None
+        
         # Initialize new state dict for custom model
         model_state = {}
         
         # ===== EMBEDDING WEIGHTS =====
         
         # Token embeddings: direct copy
-        if 'transformer.wte.weight' in pretrained_state:
-            model_state['token_emb.weight'] = pretrained_state['transformer.wte.weight']
+        wte_key = get_key('wte.weight')
+        if wte_key:
+            model_state['token_emb.weight'] = pretrained_state[wte_key]
         
         # Position embeddings: direct copy
-        if 'transformer.wpe.weight' in pretrained_state:
-            model_state['pos_emb.weight'] = pretrained_state['transformer.wpe.weight']
+        wpe_key = get_key('wpe.weight')
+        if wpe_key:
+            model_state['pos_emb.weight'] = pretrained_state[wpe_key]
         
         # ===== TRANSFORMER BLOCKS =====
         
         for layer_idx in range(model.num_layers):
-            hf_prefix = f'transformer.h.{layer_idx}'
+            hf_prefix = f'h.{layer_idx}' if not has_transformer_prefix else f'transformer.h.{layer_idx}'
             custom_prefix = f'blocks.{layer_idx}'
             
             # ===== ATTENTION LAYER NORM =====
             
-            # Pre-norm before attention: layer norm 1
-            # HF: transformer.h.{i}.ln_1.weight -> Custom: blocks.{i}.norm_attn.weight
-            if f'{hf_prefix}.ln_1.weight' in pretrained_state:
-                model_state[f'{custom_prefix}.norm_attn.weight'] = pretrained_state[f'{hf_prefix}.ln_1.weight']
-            if f'{hf_prefix}.ln_1.bias' in pretrained_state:
-                model_state[f'{custom_prefix}.norm_attn.bias'] = pretrained_state[f'{hf_prefix}.ln_1.bias']
+            ln1_w_key = f'{hf_prefix}.ln_1.weight'
+            ln1_b_key = f'{hf_prefix}.ln_1.bias'
+            if ln1_w_key in pretrained_state:
+                model_state[f'{custom_prefix}.norm_attn.weight'] = pretrained_state[ln1_w_key]
+            if ln1_b_key in pretrained_state:
+                model_state[f'{custom_prefix}.norm_attn.bias'] = pretrained_state[ln1_b_key]
             
             # ===== ATTENTION PROJECTIONS =====
             
-            # Attention Q, K, V projection: combined into single linear
-            # HF uses Conv1D: c_attn.weight shape is (in_features, out_features)
-            # PyTorch nn.Linear expects: weight shape is (out_features, in_features)
-            # Must transpose: (in, out).T -> (out, in)
-            if f'{hf_prefix}.attn.c_attn.weight' in pretrained_state:
-                # HF c_attn produces [Q, K, V] concatenated
-                # Shape: (in_features, 3*out_features) -> need to transpose to (3*out_features, in_features)
-                c_attn_weight = pretrained_state[f'{hf_prefix}.attn.c_attn.weight']
-                # Transpose Conv1D weight to Linear weight
+            c_attn_w_key = f'{hf_prefix}.attn.c_attn.weight'
+            c_attn_b_key = f'{hf_prefix}.attn.c_attn.bias'
+            if c_attn_w_key in pretrained_state:
+                c_attn_weight = pretrained_state[c_attn_w_key]
                 model_state[f'{custom_prefix}.attention.linear_qkv.weight'] = c_attn_weight.T
             
-            if f'{hf_prefix}.attn.c_attn.bias' in pretrained_state:
-                model_state[f'{custom_prefix}.attention.linear_qkv.bias'] = pretrained_state[f'{hf_prefix}.attn.c_attn.bias']
+            if c_attn_b_key in pretrained_state:
+                model_state[f'{custom_prefix}.attention.linear_qkv.bias'] = pretrained_state[c_attn_b_key]
             
             # Attention output projection
-            # HF c_proj.weight shape is (in_features, out_features), transpose to (out_features, in_features)
-            if f'{hf_prefix}.attn.c_proj.weight' in pretrained_state:
-                c_proj_weight = pretrained_state[f'{hf_prefix}.attn.c_proj.weight']
+            c_proj_w_key = f'{hf_prefix}.attn.c_proj.weight'
+            c_proj_b_key = f'{hf_prefix}.attn.c_proj.bias'
+            if c_proj_w_key in pretrained_state:
+                c_proj_weight = pretrained_state[c_proj_w_key]
                 model_state[f'{custom_prefix}.attention.linear_out.weight'] = c_proj_weight.T
             
-            if f'{hf_prefix}.attn.c_proj.bias' in pretrained_state:
-                model_state[f'{custom_prefix}.attention.linear_out.bias'] = pretrained_state[f'{hf_prefix}.attn.c_proj.bias']
+            if c_proj_b_key in pretrained_state:
+                model_state[f'{custom_prefix}.attention.linear_out.bias'] = pretrained_state[c_proj_b_key]
             
             # ===== FFN LAYER NORM =====
             
-            # Pre-norm before feed-forward: layer norm 2
-            # HF: transformer.h.{i}.ln_2.weight -> Custom: blocks.{i}.norm_ffn.weight
-            if f'{hf_prefix}.ln_2.weight' in pretrained_state:
-                model_state[f'{custom_prefix}.norm_ffn.weight'] = pretrained_state[f'{hf_prefix}.ln_2.weight']
-            if f'{hf_prefix}.ln_2.bias' in pretrained_state:
-                model_state[f'{custom_prefix}.norm_ffn.bias'] = pretrained_state[f'{hf_prefix}.ln_2.bias']
+            ln2_w_key = f'{hf_prefix}.ln_2.weight'
+            ln2_b_key = f'{hf_prefix}.ln_2.bias'
+            if ln2_w_key in pretrained_state:
+                model_state[f'{custom_prefix}.norm_ffn.weight'] = pretrained_state[ln2_w_key]
+            if ln2_b_key in pretrained_state:
+                model_state[f'{custom_prefix}.norm_ffn.bias'] = pretrained_state[ln2_b_key]
             
             # ===== FFN PROJECTIONS =====
             
-            # FFN expand layer (mlp.c_fc): expand to 4x dimension
-            # HF c_fc.weight shape is (in_features, out_features), transpose
-            if f'{hf_prefix}.mlp.c_fc.weight' in pretrained_state:
-                c_fc_weight = pretrained_state[f'{hf_prefix}.mlp.c_fc.weight']
+            c_fc_w_key = f'{hf_prefix}.mlp.c_fc.weight'
+            c_fc_b_key = f'{hf_prefix}.mlp.c_fc.bias'
+            if c_fc_w_key in pretrained_state:
+                c_fc_weight = pretrained_state[c_fc_w_key]
                 model_state[f'{custom_prefix}.ffn.linear_expand.weight'] = c_fc_weight.T
             
-            if f'{hf_prefix}.mlp.c_fc.bias' in pretrained_state:
-                model_state[f'{custom_prefix}.ffn.linear_expand.bias'] = pretrained_state[f'{hf_prefix}.mlp.c_fc.bias']
+            if c_fc_b_key in pretrained_state:
+                model_state[f'{custom_prefix}.ffn.linear_expand.bias'] = pretrained_state[c_fc_b_key]
             
-            # FFN contract layer (mlp.c_proj): contract back to original dimension
-            # HF c_proj.weight shape is (in_features, out_features), transpose
-            if f'{hf_prefix}.mlp.c_proj.weight' in pretrained_state:
-                c_proj_weight = pretrained_state[f'{hf_prefix}.mlp.c_proj.weight']
+            mlp_proj_w_key = f'{hf_prefix}.mlp.c_proj.weight'
+            mlp_proj_b_key = f'{hf_prefix}.mlp.c_proj.bias'
+            if mlp_proj_w_key in pretrained_state:
+                c_proj_weight = pretrained_state[mlp_proj_w_key]
                 model_state[f'{custom_prefix}.ffn.linear_contract.weight'] = c_proj_weight.T
             
-            if f'{hf_prefix}.mlp.c_proj.bias' in pretrained_state:
-                model_state[f'{custom_prefix}.ffn.linear_contract.bias'] = pretrained_state[f'{hf_prefix}.mlp.c_proj.bias']
+            if mlp_proj_b_key in pretrained_state:
+                model_state[f'{custom_prefix}.ffn.linear_contract.bias'] = pretrained_state[mlp_proj_b_key]
         
         # ===== FINAL OUTPUT LAYER =====
         
         # Final layer normalization
-        if 'transformer.ln_f.weight' in pretrained_state:
-            model_state['final_norm.weight'] = pretrained_state['transformer.ln_f.weight']
-        if 'transformer.ln_f.bias' in pretrained_state:
-            model_state['final_norm.bias'] = pretrained_state['transformer.ln_f.bias']
+        ln_f_w_key = get_key('ln_f.weight')
+        ln_f_b_key = get_key('ln_f.bias')
+        if ln_f_w_key:
+            model_state['final_norm.weight'] = pretrained_state[ln_f_w_key]
+        if ln_f_b_key:
+            model_state['final_norm.bias'] = pretrained_state[ln_f_b_key]
         
-        # Language model head
+        # Language model head: weight tying with token embeddings (as in HF GPT-2)
+        # In HF, lm_head.weight and wte.weight are the same tensor (tied weights)
+        # To replicate this, we load lm_head weight directly and then tie it
         if 'lm_head.weight' in pretrained_state:
             model_state['lm_head.weight'] = pretrained_state['lm_head.weight']
+        else:
+            # If lm_head.weight not found, tie it to token embeddings
+            # (this matches HF's weight tying strategy)
+            model_state['lm_head.weight'] = pretrained_state[get_key('wte.weight')] if get_key('wte.weight') else None
         
         # Load the mapped weights into the model
         model.load_state_dict(model_state, strict=False)
+        
+        # ===== WEIGHT TYING =====
+        # Tie lm_head weights to token embeddings (as HuggingFace does)
+        # This reduces parameters and improves model efficiency
+        model.lm_head.weight = model.token_emb.weight
+        
         print(f"Loaded pretrained weights from {state_dict_path}")
         print(f"Loaded {len(model_state)} parameters")
+        print(f"Tied lm_head.weight to token_emb.weight (weight tying)")
