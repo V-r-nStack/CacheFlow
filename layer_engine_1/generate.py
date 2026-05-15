@@ -7,12 +7,54 @@ from utils.profiler import ExecutionTimer
 from utils.tokenizer import GPT2Tokenizer
 
 
+def _apply_repetition_penalty(logits, generated_token_ids, penalty):
+    if penalty is None or penalty == 1.0:
+        return logits
+
+    repeated_token_ids = torch.unique(generated_token_ids.view(-1))
+    if repeated_token_ids.numel() == 0:
+        return logits
+
+    adjusted_logits = logits.clone()
+    repeated_logits = adjusted_logits.index_select(dim=-1, index=repeated_token_ids)
+    repeated_logits = torch.where(repeated_logits < 0, repeated_logits * penalty, repeated_logits / penalty)
+    adjusted_logits.index_copy_(dim=-1, index=repeated_token_ids, source=repeated_logits)
+    return adjusted_logits
+
+
+def _top_k_filter(logits, top_k):
+    if top_k is None or top_k <= 0 or top_k >= logits.size(-1):
+        return logits
+
+    values, _ = torch.topk(logits, top_k, dim=-1)
+    cutoff = values[..., -1, None]
+    return logits.masked_fill(logits < cutoff, torch.finfo(logits.dtype).min)
+
+
+def sample_next_token(
+    logits,
+    generated_token_ids,
+    temperature=1.0,
+    top_k=50,
+    repetition_penalty=1.0,
+):
+    temperature = max(float(temperature), 1e-8)
+    logits = logits / temperature
+    logits = _apply_repetition_penalty(logits, generated_token_ids, repetition_penalty)
+    logits = _top_k_filter(logits, top_k)
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1)
+
+
 def generate(
     model,
     tokenizer,
     prompt,
     max_tokens=100,
-    device='cpu'
+    device='cpu',
+    temperature=0.8,
+    top_k=50,
+    repetition_penalty=1.1,
 ):
     """
     Autoregressive text generation using greedy sampling.
@@ -30,34 +72,33 @@ def generate(
     
     # ===== ENCODE PROMPT =====
     
-    # Tokenize the input prompt
-    # prompt: str -> token_ids: List[int]
     prompt_token_ids = tokenizer.encode(prompt)
-    
-    # Convert to torch tensor and move to device
-    # List[int] -> Tensor of shape (1, prompt_len)
     sequence = torch.tensor(prompt_token_ids, dtype=torch.long, device=device).unsqueeze(0)
+    if sequence.size(1) > model.max_seq_len:
+        sequence = sequence[:, -model.max_seq_len:]
     
     print(f"Prompt: {prompt}")
     print(f"Encoded to {len(prompt_token_ids)} tokens")
     print(f"Generating up to {max_tokens} tokens...\n")
     
-    # Set model to evaluation mode (disables dropout)
     model.eval()
-    
-    # ===== AUTOREGRESSIVE GENERATION LOOP =====
     
     ttft = None
     itl_times = []
 
-    with torch.no_grad():
-        # Measure the first forward pass separately for TTFT.
+    with torch.inference_mode():
         with ExecutionTimer() as timer:
             logits = model(sequence)
 
         ttft = timer.elapsed
         last_token_logits = logits[:, -1, :]
-        next_token_id = torch.argmax(last_token_logits, dim=-1, keepdim=True)
+        next_token_id = sample_next_token(
+            last_token_logits,
+            sequence,
+            temperature=temperature,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+        )
         sequence = torch.cat([sequence, next_token_id], dim=1)
 
         print(f"TTFT (Time to First Token): {ttft:.6f} seconds")
@@ -65,15 +106,23 @@ def generate(
         if next_token_id.item() == 50256:
             print("Generated [END] token")
         else:
-            # Measure each subsequent forward pass as ITL.
             for _ in range(max_tokens - 1):
                 with ExecutionTimer() as timer:
                     logits = model(sequence)
 
                 itl_times.append(timer.elapsed)
                 last_token_logits = logits[:, -1, :]
-                next_token_id = torch.argmax(last_token_logits, dim=-1, keepdim=True)
+                next_token_id = sample_next_token(
+                    last_token_logits,
+                    sequence,
+                    temperature=temperature,
+                    top_k=top_k,
+                    repetition_penalty=repetition_penalty,
+                )
                 sequence = torch.cat([sequence, next_token_id], dim=1)
+
+                if sequence.size(1) > model.max_seq_len:
+                    sequence = sequence[:, -model.max_seq_len:]
 
                 if next_token_id.item() == 50256:
                     print("Generated [END] token")
@@ -117,6 +166,24 @@ def main():
         type=int,
         default=50,
         help="Maximum number of tokens to generate"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.8,
+        help="Sampling temperature"
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=50,
+        help="Top-k sampling cutoff"
+    )
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=1.1,
+        help="Penalty applied to repeated tokens"
     )
     parser.add_argument(
         "--model-path",
@@ -181,7 +248,10 @@ def main():
         tokenizer=tokenizer,
         prompt=args.prompt,
         max_tokens=args.max_tokens,
-        device=args.device
+        device=args.device,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        repetition_penalty=args.repetition_penalty,
     )
     
     # ===== OUTPUT RESULTS =====

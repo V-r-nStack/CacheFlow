@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 
@@ -33,21 +37,33 @@ class GPT(nn.Module):
         # Final norm before logits.
         self.final_norm = nn.LayerNorm(dim)
 
-        # (B, T, C) -> (B, T, V)
-        self.lm_head = nn.Linear(dim, vocab_size)
+        # GPT-2 ties the head to the token embeddings and keeps it bias-free.
+        self.lm_head = nn.Linear(dim, vocab_size, bias=False)
+        self.tie_weights()
+
+    def tie_weights(self):
+        """Keep the token embedding and output head shared."""
+
+        self.lm_head.weight = self.token_emb.weight
 
     def forward(self, token_ids):
         """Return per-token logits for the full context."""
+
         batch_size, seq_len = token_ids.shape
 
-        # Token lookup.
+        if seq_len > self.max_seq_len:
+            raise ValueError(
+                f"Sequence length {seq_len} exceeds context window {self.max_seq_len}"
+            )
+
         token_embeds = self.token_emb(token_ids)
 
-        # Position ids are broadcast across batch.
-        pos_ids = torch.arange(seq_len, device=token_ids.device, dtype=torch.long)
+        pos_ids = torch.arange(
+            seq_len,
+            device=token_ids.device,
+            dtype=torch.long,
+        )
         pos_embeds = self.pos_emb(pos_ids)
-
-        # (B, T, C) + (T, C) -> (B, T, C)
         x = token_embeds + pos_embeds
         x = self.emb_dropout(x)
 
@@ -61,92 +77,87 @@ class GPT(nn.Module):
 
     @classmethod
     def load_pretrained_weights(cls, model, state_dict_path):
-        """Map a GPT-2 state dict into this module layout."""
-        pretrained_state = torch.load(state_dict_path, map_location='cpu')
-        has_transformer_prefix = any(k.startswith('transformer.') for k in pretrained_state.keys())
+        """Map a GPT-2 checkpoint into this module layout."""
 
-        def resolve_key(base_key):
-            key = f'transformer.{base_key}' if has_transformer_prefix else base_key
+        state_path = Path(state_dict_path)
+        pretrained_state = torch.load(state_path, map_location='cpu')
+        if not isinstance(pretrained_state, dict):
+            raise TypeError(f"Expected a state dict at {state_path}, got {type(pretrained_state)!r}")
+
+        has_transformer_prefix = any(key.startswith('transformer.') for key in pretrained_state)
+        source_prefix = 'transformer.' if has_transformer_prefix else ''
+        block_prefix = f'{source_prefix}h.'
+
+        expected_state = model.state_dict()
+        model_state = {}
+        mapped_keys = []
+
+        def checkpoint_key(name):
+            key = f'{source_prefix}{name}'
             return key if key in pretrained_state else None
 
-        model_state = {}
+        def add_tensor(model_key, checkpoint_name, transpose=False):
+            source_key = checkpoint_key(checkpoint_name)
+            if source_key is None:
+                return None
 
-        wte_key = resolve_key('wte.weight')
-        if wte_key:
-            model_state['token_emb.weight'] = pretrained_state[wte_key]
+            tensor = pretrained_state[source_key]
+            if transpose:
+                tensor = tensor.T
 
-        wpe_key = resolve_key('wpe.weight')
-        if wpe_key:
-            model_state['pos_emb.weight'] = pretrained_state[wpe_key]
+            expected_tensor = expected_state[model_key]
+            if tensor.shape != expected_tensor.shape:
+                raise ValueError(
+                    f"Shape mismatch for {model_key}: expected {tuple(expected_tensor.shape)}, got {tuple(tensor.shape)} from {source_key}"
+                )
 
-        block_prefix = 'transformer.h.' if has_transformer_prefix else 'h.'
+            model_state[model_key] = tensor
+            mapped_keys.append((model_key, source_key, tuple(tensor.shape)))
+            return tensor
+
+        add_tensor('token_emb.weight', 'wte.weight')
+        add_tensor('pos_emb.weight', 'wpe.weight')
 
         for layer_idx in range(model.num_layers):
             hf_prefix = f'{block_prefix}{layer_idx}'
             custom_prefix = f'blocks.{layer_idx}'
 
-            ln1_w_key = f'{hf_prefix}.ln_1.weight'
-            ln1_b_key = f'{hf_prefix}.ln_1.bias'
-            if ln1_w_key in pretrained_state:
-                model_state[f'{custom_prefix}.norm_attn.weight'] = pretrained_state[ln1_w_key]
-            if ln1_b_key in pretrained_state:
-                model_state[f'{custom_prefix}.norm_attn.bias'] = pretrained_state[ln1_b_key]
+            add_tensor(f'{custom_prefix}.norm_attn.weight', f'{hf_prefix}.ln_1.weight')
+            add_tensor(f'{custom_prefix}.norm_attn.bias', f'{hf_prefix}.ln_1.bias')
+            add_tensor(f'{custom_prefix}.attention.linear_qkv.weight', f'{hf_prefix}.attn.c_attn.weight', transpose=True)
+            add_tensor(f'{custom_prefix}.attention.linear_qkv.bias', f'{hf_prefix}.attn.c_attn.bias')
+            add_tensor(f'{custom_prefix}.attention.linear_out.weight', f'{hf_prefix}.attn.c_proj.weight', transpose=True)
+            add_tensor(f'{custom_prefix}.attention.linear_out.bias', f'{hf_prefix}.attn.c_proj.bias')
+            add_tensor(f'{custom_prefix}.norm_ffn.weight', f'{hf_prefix}.ln_2.weight')
+            add_tensor(f'{custom_prefix}.norm_ffn.bias', f'{hf_prefix}.ln_2.bias')
+            add_tensor(f'{custom_prefix}.ffn.linear_expand.weight', f'{hf_prefix}.mlp.c_fc.weight', transpose=True)
+            add_tensor(f'{custom_prefix}.ffn.linear_expand.bias', f'{hf_prefix}.mlp.c_fc.bias')
+            add_tensor(f'{custom_prefix}.ffn.linear_contract.weight', f'{hf_prefix}.mlp.c_proj.weight', transpose=True)
+            add_tensor(f'{custom_prefix}.ffn.linear_contract.bias', f'{hf_prefix}.mlp.c_proj.bias')
 
-            c_attn_w_key = f'{hf_prefix}.attn.c_attn.weight'
-            c_attn_b_key = f'{hf_prefix}.attn.c_attn.bias'
-            if c_attn_w_key in pretrained_state:
-                # Conv1D -> Linear: transpose weight layout.
-                model_state[f'{custom_prefix}.attention.linear_qkv.weight'] = pretrained_state[c_attn_w_key].T
-            if c_attn_b_key in pretrained_state:
-                model_state[f'{custom_prefix}.attention.linear_qkv.bias'] = pretrained_state[c_attn_b_key]
+        add_tensor('final_norm.weight', 'ln_f.weight')
+        add_tensor('final_norm.bias', 'ln_f.bias')
 
-            c_proj_w_key = f'{hf_prefix}.attn.c_proj.weight'
-            c_proj_b_key = f'{hf_prefix}.attn.c_proj.bias'
-            if c_proj_w_key in pretrained_state:
-                # Conv1D -> Linear: transpose weight layout.
-                model_state[f'{custom_prefix}.attention.linear_out.weight'] = pretrained_state[c_proj_w_key].T
-            if c_proj_b_key in pretrained_state:
-                model_state[f'{custom_prefix}.attention.linear_out.bias'] = pretrained_state[c_proj_b_key]
+        if checkpoint_key('lm_head.weight') is not None:
+            add_tensor('lm_head.weight', 'lm_head.weight')
+        else:
+            model_state['lm_head.weight'] = model_state['token_emb.weight']
 
-            ln2_w_key = f'{hf_prefix}.ln_2.weight'
-            ln2_b_key = f'{hf_prefix}.ln_2.bias'
-            if ln2_w_key in pretrained_state:
-                model_state[f'{custom_prefix}.norm_ffn.weight'] = pretrained_state[ln2_w_key]
-            if ln2_b_key in pretrained_state:
-                model_state[f'{custom_prefix}.norm_ffn.bias'] = pretrained_state[ln2_b_key]
+        load_result = model.load_state_dict(model_state, strict=False)
+        model.tie_weights()
 
-            c_fc_w_key = f'{hf_prefix}.mlp.c_fc.weight'
-            c_fc_b_key = f'{hf_prefix}.mlp.c_fc.bias'
-            if c_fc_w_key in pretrained_state:
-                # Conv1D -> Linear: transpose weight layout.
-                model_state[f'{custom_prefix}.ffn.linear_expand.weight'] = pretrained_state[c_fc_w_key].T
-            if c_fc_b_key in pretrained_state:
-                model_state[f'{custom_prefix}.ffn.linear_expand.bias'] = pretrained_state[c_fc_b_key]
+        loaded_tensors = len(mapped_keys)
+        loaded_parameters = sum(tensor.numel() for tensor in model_state.values())
 
-            mlp_proj_w_key = f'{hf_prefix}.mlp.c_proj.weight'
-            mlp_proj_b_key = f'{hf_prefix}.mlp.c_proj.bias'
-            if mlp_proj_w_key in pretrained_state:
-                # Conv1D -> Linear: transpose weight layout.
-                model_state[f'{custom_prefix}.ffn.linear_contract.weight'] = pretrained_state[mlp_proj_w_key].T
-            if mlp_proj_b_key in pretrained_state:
-                model_state[f'{custom_prefix}.ffn.linear_contract.bias'] = pretrained_state[mlp_proj_b_key]
+        print(f"Loaded pretrained weights from {state_path}")
+        print(f"Loaded tensor count: {loaded_tensors}")
+        print(f"Loaded parameter elements: {loaded_parameters}")
+        print(f"Missing keys: {load_result.missing_keys if load_result.missing_keys else []}")
+        print(f"Unexpected keys: {load_result.unexpected_keys if load_result.unexpected_keys else []}")
 
-        ln_f_w_key = resolve_key('ln_f.weight')
-        ln_f_b_key = resolve_key('ln_f.bias')
-        if ln_f_w_key:
-            model_state['final_norm.weight'] = pretrained_state[ln_f_w_key]
-        if ln_f_b_key:
-            model_state['final_norm.bias'] = pretrained_state[ln_f_b_key]
+        if mapped_keys:
+            print("Loaded mapping summary:")
+            for model_key, source_key, shape in mapped_keys[:8]:
+                print(f"  {source_key} -> {model_key} {shape}")
 
-        lm_head_key = resolve_key('lm_head.weight')
-        if lm_head_key:
-            model_state['lm_head.weight'] = pretrained_state[lm_head_key]
-        elif wte_key:
-            model_state['lm_head.weight'] = pretrained_state[wte_key]
-
-        model.load_state_dict(model_state, strict=False)
-        model.lm_head.weight = model.token_emb.weight
-
-        print(f"Loaded pretrained weights from {state_dict_path}")
-        print(f"Loaded {len(model_state)} parameters")
-        print("Tied lm_head.weight to token_emb.weight (weight tying)")
+        print("Tied lm_head.weight to token_emb.weight")
