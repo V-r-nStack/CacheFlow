@@ -14,21 +14,20 @@ def generate(
     max_tokens=100,
     device='cpu'
 ):
+    """Autoregressive generation with temperature/top-k sampling.
+
+    Parameters
+    - model: GPT model instance
+    - tokenizer: GPT2Tokenizer instance
+    - prompt: initial text prompt
+    - max_tokens: maximum number of tokens to generate
+    - device: inference device ('cpu' or 'cuda')
+    - temperature, top_k, repetition_penalty: sampling controls
+
+    Returns
+    - Generated text string
     """
-    Autoregressive text generation using greedy sampling.
     
-    Args:
-        model: GPT model instance
-        tokenizer: GPT2Tokenizer instance
-        prompt: Initial text prompt as string
-        max_tokens: Maximum number of tokens to generate
-        device: Device to run inference on ('cpu' or 'cuda')
-        
-    Returns:
-        Generated text string
-    """
-    
-    # ===== ENCODE PROMPT =====
     
     # Tokenize the input prompt
     # prompt: str -> token_ids: List[int]
@@ -79,8 +78,6 @@ def generate(
                     print("Generated [END] token")
                     break
     
-    # ===== DECODE OUTPUT =====
-    
     # Convert tensor back to list of token IDs
     # (1, final_seq_len) -> List[int]
     generated_token_ids = sequence[0].tolist()
@@ -101,7 +98,6 @@ def generate(
 def main():
     """Main execution entrypoint for text generation."""
     
-    # ===== PARSE COMMAND-LINE ARGUMENTS =====
     
     parser = argparse.ArgumentParser(
         description="Generate text using GPT model"
@@ -133,8 +129,6 @@ def main():
     
     args = parser.parse_args()
     
-    # ===== INITIALIZE MODEL =====
-    
     # GPT-2 small configuration
     vocab_size = 50257  # Standard GPT-2 vocabulary size
     max_seq_len = 1024  # Maximum sequence length
@@ -152,7 +146,6 @@ def main():
         dropout=0.0
     )
     
-    # ===== LOAD PRETRAINED WEIGHTS =====
     
     model_path = Path(args.model_path)
     if model_path.exists():
@@ -169,12 +162,10 @@ def main():
     # Move model to device
     model.to(args.device)
     
-    # ===== INITIALIZE TOKENIZER =====
     
     print("Initializing GPT-2 tokenizer")
     tokenizer = GPT2Tokenizer()
     
-    # ===== RUN GENERATION =====
     
     generated_text = generate(
         model=model,
@@ -183,8 +174,6 @@ def main():
         max_tokens=args.max_tokens,
         device=args.device
     )
-    
-    # ===== OUTPUT RESULTS =====
     
     print("\n" + "="*80)
     print("GENERATED TEXT:")
