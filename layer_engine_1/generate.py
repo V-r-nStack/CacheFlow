@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 
 from model.gpt import GPT
+from runtime.kv_cache import KVCacheManager
 from utils.profiler import ExecutionTimer
 from utils.tokenizer import GPT2Tokenizer
 
@@ -55,6 +56,8 @@ def generate(
     temperature=0.8,
     top_k=50,
     repetition_penalty=1.1,
+    use_kv_cache=True,
+    return_metrics=False,
 ):
     """Autoregressive generation with temperature/top-k sampling.
 
@@ -65,6 +68,8 @@ def generate(
     - max_tokens: maximum number of tokens to generate
     - device: inference device ('cpu' or 'cuda')
     - temperature, top_k, repetition_penalty: sampling controls
+    - use_kv_cache: enable stateful KV-cached decoding when True
+    - return_metrics: when True, return text plus timing metadata
 
     Returns
     - Generated text string
@@ -72,9 +77,14 @@ def generate(
     
     
     prompt_token_ids = tokenizer.encode(prompt)
-    sequence = torch.tensor(prompt_token_ids, dtype=torch.long, device=device).unsqueeze(0)
-    if sequence.size(1) > model.max_seq_len:
-        sequence = sequence[:, -model.max_seq_len:]
+    prompt_token_tensor = torch.tensor(prompt_token_ids, dtype=torch.long, device=device).unsqueeze(0)
+    if prompt_token_tensor.size(1) > model.max_seq_len:
+        prompt_token_tensor = prompt_token_tensor[:, -model.max_seq_len:]
+
+    sequence_token_ids = prompt_token_tensor[0].tolist()
+    latest_token = None
+
+    kv_cache = KVCacheManager.init_cache(model.num_layers) if use_kv_cache else None
     
     print(f"Prompt: {prompt}")
     print(f"Encoded to {len(prompt_token_ids)} tokens")
@@ -86,54 +96,100 @@ def generate(
     itl_times = []
 
     with torch.inference_mode():
-        with ExecutionTimer() as timer:
-            logits = model(sequence)
+        if use_kv_cache:
+            with ExecutionTimer() as timer:
+                logits = model(prompt_token_tensor, kv_cache=kv_cache)
 
-        ttft = timer.elapsed
-        last_token_logits = logits[:, -1, :]
-        next_token_id = sample_next_token(
-            last_token_logits,
-            sequence,
-            temperature=temperature,
-            top_k=top_k,
-            repetition_penalty=repetition_penalty,
-        )
-        sequence = torch.cat([sequence, next_token_id], dim=1)
+            ttft = timer.elapsed
+            last_token_logits = logits[:, -1, :]
+            latest_token = sample_next_token(
+                last_token_logits,
+                prompt_token_tensor,
+                temperature=temperature,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+            )
+            sequence_token_ids.append(latest_token.item())
 
-        print(f"TTFT (Time to First Token): {ttft:.6f} seconds")
+            print(f"TTFT (Time to First Token): {ttft:.6f} seconds")
 
-        if next_token_id.item() == 50256:
-            print("Generated [END] token")
+            if latest_token.item() == 50256:
+                print("Generated [END] token")
+            else:
+                for _ in range(max_tokens - 1):
+                    with ExecutionTimer() as timer:
+                        logits = model(latest_token, kv_cache=kv_cache)
+
+                    itl_times.append(timer.elapsed)
+                    last_token_logits = logits[:, -1, :]
+                    generated_token_tensor = torch.tensor(
+                        sequence_token_ids,
+                        dtype=torch.long,
+                        device=device,
+                    ).unsqueeze(0)
+                    latest_token = sample_next_token(
+                        last_token_logits,
+                        generated_token_tensor,
+                        temperature=temperature,
+                        top_k=top_k,
+                        repetition_penalty=repetition_penalty,
+                    )
+                    sequence_token_ids.append(latest_token.item())
+
+                    if latest_token.item() == 50256:
+                        print("Generated [END] token")
+                        break
         else:
-            for _ in range(max_tokens - 1):
-                with ExecutionTimer() as timer:
-                    logits = model(sequence)
+            sequence = prompt_token_tensor
 
-                itl_times.append(timer.elapsed)
-                last_token_logits = logits[:, -1, :]
-                next_token_id = sample_next_token(
-                    last_token_logits,
-                    sequence,
-                    temperature=temperature,
-                    top_k=top_k,
-                    repetition_penalty=repetition_penalty,
-                )
-                sequence = torch.cat([sequence, next_token_id], dim=1)
+            with ExecutionTimer() as timer:
+                logits = model(sequence)
 
-                if sequence.size(1) > model.max_seq_len:
-                    sequence = sequence[:, -model.max_seq_len:]
+            ttft = timer.elapsed
+            last_token_logits = logits[:, -1, :]
+            latest_token = sample_next_token(
+                last_token_logits,
+                sequence,
+                temperature=temperature,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+            )
+            sequence = torch.cat([sequence, latest_token], dim=1)
+            sequence_token_ids.append(latest_token.item())
 
-                if next_token_id.item() == 50256:
-                    print("Generated [END] token")
-                    break
+            print(f"TTFT (Time to First Token): {ttft:.6f} seconds")
+
+            if latest_token.item() == 50256:
+                print("Generated [END] token")
+            else:
+                for _ in range(max_tokens - 1):
+                    with ExecutionTimer() as timer:
+                        logits = model(sequence)
+
+                    itl_times.append(timer.elapsed)
+                    last_token_logits = logits[:, -1, :]
+                    latest_token = sample_next_token(
+                        last_token_logits,
+                        sequence,
+                        temperature=temperature,
+                        top_k=top_k,
+                        repetition_penalty=repetition_penalty,
+                    )
+                    sequence = torch.cat([sequence, latest_token], dim=1)
+                    sequence_token_ids.append(latest_token.item())
+
+                    if sequence.size(1) > model.max_seq_len:
+                        sequence = sequence[:, -model.max_seq_len:]
+
+                    if latest_token.item() == 50256:
+                        print("Generated [END] token")
+                        break
     
     # Convert tensor back to list of token IDs
     # (1, final_seq_len) -> List[int]
-    generated_token_ids = sequence[0].tolist()
-    
     # Decode all tokens to text
     # List[int] -> str
-    generated_text = tokenizer.decode(generated_token_ids)
+    generated_text = tokenizer.decode(sequence_token_ids)
 
     if itl_times:
         average_itl = sum(itl_times) / len(itl_times)
@@ -141,6 +197,9 @@ def generate(
     else:
         print("Average ITL (Inter-Token Latency): N/A (no subsequent tokens generated)")
     
+    if return_metrics:
+        return generated_text, ttft, itl_times, sequence_token_ids
+
     return generated_text
 
 
