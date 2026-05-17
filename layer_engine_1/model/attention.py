@@ -25,8 +25,8 @@ class CausalMultiHeadAttention(nn.Module):
         # Attention weight dropout.
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        """Apply masked attention over the full sequence."""
+    def forward(self, x, kv_cache=None, layer_idx=None):
+        """Apply causal attention, with optional KV cache support."""
 
         batch_size, seq_len, dim = x.shape
 
@@ -36,12 +36,25 @@ class CausalMultiHeadAttention(nn.Module):
 
         query, key, value = qkv[0], qkv[1], qkv[2]
 
-        scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+        if kv_cache is not None:
+            if layer_idx is None:
+                raise ValueError("layer_idx must be provided when kv_cache is used")
 
-        causal_mask = torch.tril(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
-        )
-        scores = scores.masked_fill(~causal_mask, torch.finfo(scores.dtype).min)
+            cached_key, cached_value = kv_cache.get_layer(layer_idx)
+
+            if cached_key is not None and cached_value is not None:
+                key = torch.cat([cached_key, key], dim=2)
+                value = torch.cat([cached_value, value], dim=2)
+
+            kv_cache.set_layer(layer_idx, key, value)
+            scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+        else:
+            scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+
+            causal_mask = torch.tril(
+                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
+            )
+            scores = scores.masked_fill(~causal_mask, torch.finfo(scores.dtype).min)
 
         attn_weights = torch.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
