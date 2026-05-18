@@ -47,12 +47,15 @@ class CausalMultiHeadAttention(nn.Module):
                 value = torch.cat([cached_value, value], dim=2)
 
             kv_cache.set_layer(layer_idx, key, value)
-            scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
         else:
-            scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+            cached_key = None
+            cached_value = None
 
+        scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+
+        if query.size(2) > 1:
             causal_mask = torch.tril(
-                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
+                torch.ones(query.size(2), key.size(2), device=x.device, dtype=torch.bool)
             )
             scores = scores.masked_fill(~causal_mask, torch.finfo(scores.dtype).min)
 

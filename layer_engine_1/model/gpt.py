@@ -58,8 +58,15 @@ class GPT(nn.Module):
 
         token_embeds = self.token_emb(idx)
 
+        past_seq_len = 0
+        if kv_cache is not None:
+            past_key, _ = kv_cache.get_layer(0)
+            if past_key is not None:
+                past_seq_len = past_key.size(2)
+
         pos_ids = torch.arange(
-            seq_len,
+            past_seq_len,
+            past_seq_len + seq_len,
             device=idx.device,
             dtype=torch.long,
         )
