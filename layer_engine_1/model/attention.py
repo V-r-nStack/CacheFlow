@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+from typing import Optional
+
+from runtime.static_kv_cache import StaticKVCache
 
 
 class CausalMultiHeadAttention(nn.Module):
@@ -25,8 +28,15 @@ class CausalMultiHeadAttention(nn.Module):
         # Attention weight dropout.
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, kv_cache=None, layer_idx=None):
-        """Apply causal attention, with optional KV cache support."""
+    def forward(
+        self,
+        x,
+        kv_cache=None,
+        layer_idx=None,
+        static_kv_cache: Optional[StaticKVCache] = None,
+        slot_mapping: Optional[torch.Tensor] = None,
+    ):
+        """Apply causal attention with optional KV cache support."""
 
         batch_size, seq_len, dim = x.shape
 
@@ -36,7 +46,40 @@ class CausalMultiHeadAttention(nn.Module):
 
         query, key, value = qkv[0], qkv[1], qkv[2]
 
-        if kv_cache is not None:
+        if static_kv_cache is not None or slot_mapping is not None:
+            if static_kv_cache is None or slot_mapping is None:
+                raise ValueError("static_kv_cache and slot_mapping must be provided together")
+            if layer_idx is None:
+                raise ValueError("layer_idx must be provided when static_kv_cache is used")
+
+            slot_mapping = slot_mapping.to(device=x.device, dtype=torch.long)
+            total_seq_len = int(slot_mapping.size(1))
+            if total_seq_len < seq_len:
+                raise ValueError("slot_mapping length must be >= input sequence length")
+
+            write_slots = slot_mapping[:, -seq_len:].reshape(-1)
+            key_to_store = key.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
+            value_to_store = value.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
+
+            cache_k = static_kv_cache.cache[0, layer_idx]
+            cache_v = static_kv_cache.cache[1, layer_idx]
+            with torch.no_grad():
+                cache_k.index_copy_(0, write_slots, key_to_store)
+                cache_v.index_copy_(0, write_slots, value_to_store)
+
+            read_slots = slot_mapping.reshape(-1)
+            key = cache_k.index_select(0, read_slots)
+            value = cache_v.index_select(0, read_slots)
+            key = key.reshape(batch_size, total_seq_len, self.num_heads, self.head_dim)
+            value = value.reshape(batch_size, total_seq_len, self.num_heads, self.head_dim)
+            key = key.permute(0, 2, 1, 3)
+            value = value.permute(0, 2, 1, 3)
+
+            if key.dtype != query.dtype:
+                key = key.to(query.dtype)
+            if value.dtype != query.dtype:
+                value = value.to(query.dtype)
+        elif kv_cache is not None:
             if layer_idx is None:
                 raise ValueError("layer_idx must be provided when kv_cache is used")
 
@@ -53,10 +96,20 @@ class CausalMultiHeadAttention(nn.Module):
 
         scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
 
-        if query.size(2) > 1:
-            causal_mask = torch.tril(
-                torch.ones(query.size(2), key.size(2), device=x.device, dtype=torch.bool)
-            )
+        query_len = query.size(2)
+        key_len = key.size(2)
+        if key_len < query_len:
+            raise ValueError("key sequence length cannot be shorter than query length")
+
+        if key_len > 1:
+            if key_len == query_len:
+                causal_mask = torch.tril(
+                    torch.ones(query_len, key_len, device=x.device, dtype=torch.bool)
+                )
+            else:
+                key_positions = torch.arange(key_len, device=x.device)
+                query_positions = torch.arange(query_len, device=x.device) + (key_len - query_len)
+                causal_mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
             scores = scores.masked_fill(~causal_mask, torch.finfo(scores.dtype).min)
 
         attn_weights = torch.softmax(scores, dim=-1)

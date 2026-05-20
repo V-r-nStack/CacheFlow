@@ -41,6 +41,8 @@ class Sequence:
     kv_slot_indices: List[int] = field(default_factory=list)
     arrival_time: float = field(default_factory=time)
     finish_time: Optional[float] = None
+    ttft_s: Optional[float] = None
+    total_latency_s: Optional[float] = None
     status: SequenceStatus = SequenceStatus.WAITING
 
     @property

@@ -70,12 +70,18 @@ class TransformerBlock(nn.Module):
 
         self.ffn = FeedForward(dim, dropout=dropout)
 
-    def forward(self, x, kv_cache=None, layer_idx=None):
+    def forward(self, x, kv_cache=None, layer_idx=None, static_kv_cache=None, slot_mapping=None):
         """Run attention and MLP residual branches."""
 
         # x -> LN -> attention -> residual
         x_norm = self.norm_attn(x)
-        attn_out = self.attention(x_norm, kv_cache=kv_cache, layer_idx=layer_idx)
+        attn_out = self.attention(
+            x_norm,
+            kv_cache=kv_cache,
+            layer_idx=layer_idx,
+            static_kv_cache=static_kv_cache,
+            slot_mapping=slot_mapping,
+        )
         x = x + attn_out
 
         # x -> LN -> MLP -> residual

@@ -4,9 +4,10 @@ This module stays strictly focused on request placement and batch bookkeeping.
 It does not perform model execution, tensor allocation, or KV-cache access.
 """
 
-from typing import List
+from typing import List, Optional
 
 from runtime.sequence import Sequence, SequenceStatus
+from runtime.static_kv_cache import StaticKVCache
 
 
 class Scheduler:
@@ -56,6 +57,53 @@ class Scheduler:
 
         self.active_batch = remaining_active_batch
         return evicted_sequences
+
+    def step_eviction(self, static_kv_cache: StaticKVCache) -> List[Sequence]:
+        """Evict FINISHED sequences, return KV slots, and log latency stats."""
+
+        if not isinstance(static_kv_cache, StaticKVCache):
+            raise TypeError("static_kv_cache must be a StaticKVCache instance")
+
+        evicted_sequences: List[Sequence] = []
+        remaining_active_batch: List[Sequence] = []
+
+        for sequence in self.active_batch:
+            if sequence.status != SequenceStatus.FINISHED:
+                remaining_active_batch.append(sequence)
+                continue
+
+            static_kv_cache.return_slots(sequence.kv_slot_indices)
+            sequence.clear_kv_slot_indices()
+
+            ttft_s = sequence.ttft_s
+            total_latency_s = self._resolve_total_latency(sequence)
+            self._log_sequence_latency(sequence, ttft_s, total_latency_s)
+
+            evicted_sequences.append(sequence)
+
+        self.active_batch = remaining_active_batch
+        return evicted_sequences
+
+    @staticmethod
+    def _resolve_total_latency(sequence: Sequence) -> Optional[float]:
+        if sequence.total_latency_s is not None:
+            return sequence.total_latency_s
+        if sequence.finish_time is None:
+            return None
+        return max(0.0, sequence.finish_time - sequence.arrival_time)
+
+    @staticmethod
+    def _log_sequence_latency(
+        sequence: Sequence,
+        ttft_s: Optional[float],
+        total_latency_s: Optional[float],
+    ) -> None:
+        ttft_text = "N/A" if ttft_s is None else f"{ttft_s:.6f}s"
+        total_text = "N/A" if total_latency_s is None else f"{total_latency_s:.6f}s"
+        print(
+            "Sequence "
+            f"{sequence.seq_id} finished | TTFT: {ttft_text} | Total latency: {total_text}"
+        )
 
     def schedule_next_iteration(self, policy: str = "fcfs") -> List[Sequence]:
         """Promote waiting requests into the active batch.
