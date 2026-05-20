@@ -57,5 +57,52 @@ class Scheduler:
         self.active_batch = remaining_active_batch
         return evicted_sequences
 
+    def schedule_next_iteration(self, policy: str = "fcfs") -> List[Sequence]:
+        """Promote waiting requests into the active batch.
+
+        Supported policies:
+        - ``fcfs``: order by ``arrival_time`` from oldest to newest
+        - ``shortest_prompt_first``: order by prompt token length, then arrival
+
+        The method first evicts completed active requests, then fills any free
+        capacity up to ``max_batch_size``. If the waiting queue is empty, the
+        method simply returns the current active batch state after eviction.
+        """
+
+        normalized_policy = str(policy).strip().lower()
+        self._evict_completed()
+
+        available_capacity = self.max_batch_size - len(self.active_batch)
+        if available_capacity <= 0 or not self.waiting_queue:
+            return self.active_batch
+
+        if normalized_policy == "fcfs":
+            ordered_waiting_queue = sorted(
+                self.waiting_queue,
+                key=lambda sequence: (sequence.arrival_time, sequence.seq_id),
+            )
+        elif normalized_policy == "shortest_prompt_first":
+            ordered_waiting_queue = sorted(
+                self.waiting_queue,
+                key=lambda sequence: (
+                    len(sequence.prompt_token_ids),
+                    sequence.arrival_time,
+                    sequence.seq_id,
+                ),
+            )
+        else:
+            raise ValueError(
+                "policy must be either 'fcfs' or 'shortest_prompt_first'"
+            )
+
+        promoted_sequences = ordered_waiting_queue[:available_capacity]
+        promoted_ids = {id(sequence) for sequence in promoted_sequences}
+
+        self.waiting_queue = [
+            sequence for sequence in self.waiting_queue if id(sequence) not in promoted_ids
+        ]
+        self.active_batch.extend(promoted_sequences)
+        return self.active_batch
+
 
 __all__ = ["Scheduler"]
