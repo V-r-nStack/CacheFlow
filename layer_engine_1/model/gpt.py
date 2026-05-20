@@ -46,29 +46,36 @@ class GPT(nn.Module):
 
         self.lm_head.weight = self.token_emb.weight
 
-    def forward(self, token_ids):
+    def forward(self, idx, kv_cache=None):
         """Return per-token logits for the full context."""
 
-        batch_size, seq_len = token_ids.shape
+        batch_size, seq_len = idx.shape
 
         if seq_len > self.max_seq_len:
             raise ValueError(
                 f"Sequence length {seq_len} exceeds context window {self.max_seq_len}"
             )
 
-        token_embeds = self.token_emb(token_ids)
+        token_embeds = self.token_emb(idx)
+
+        past_seq_len = 0
+        if kv_cache is not None:
+            past_key, _ = kv_cache.get_layer(0)
+            if past_key is not None:
+                past_seq_len = past_key.size(2)
 
         pos_ids = torch.arange(
-            seq_len,
-            device=token_ids.device,
+            past_seq_len,
+            past_seq_len + seq_len,
+            device=idx.device,
             dtype=torch.long,
         )
         pos_embeds = self.pos_emb(pos_ids)
         x = token_embeds + pos_embeds
         x = self.emb_dropout(x)
 
-        for block in self.blocks:
-            x = block(x)
+        for layer_idx, block in enumerate(self.blocks):
+            x = block(x, kv_cache=kv_cache, layer_idx=layer_idx)
 
         x = self.final_norm(x)
         logits = self.lm_head(x)

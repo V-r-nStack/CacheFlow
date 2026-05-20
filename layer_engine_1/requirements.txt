@@ -1,4 +1,6 @@
+--extra-index-url https://pytorch.org
 torch
 numpy
 tiktoken
 requests
+psutil
