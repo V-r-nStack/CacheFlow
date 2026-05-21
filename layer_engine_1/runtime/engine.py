@@ -13,6 +13,7 @@ from runtime.batching import prepare_continuous_batch
 from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
+from runtime.tracer import RuntimeTracer
 
 
 def _sample_next_token(
@@ -69,6 +70,8 @@ def run_engine(
     repetition_penalty: float = 1.0,
     policy: str = "fcfs",
     metrics_path: Optional[str] = None,
+    runtime_tracer: Optional[RuntimeTracer] = None,
+    tracer_dump_path: Optional[str] = None,
 ) -> None:
     """Run the continuous decoding loop until all work is complete."""
 
@@ -224,9 +227,23 @@ def run_engine(
                     ]
                 )
                 metrics_file.flush()
+
+            if runtime_tracer is not None:
+                free_slots = memory_manager.free_slots_count()
+                allocated_slots = static_kv_cache.total_slots - free_slots
+                runtime_tracer.record_tick(
+                    timestamp=time.time(),
+                    queue_depth=queue_depth,
+                    active_batch_size=active_batch_size,
+                    allocated_kv_slots=allocated_slots,
+                    free_kv_slots=free_slots,
+                    itl_s=itl_s,
+                )
     finally:
         if metrics_file is not None:
             metrics_file.close()
+        if runtime_tracer is not None and tracer_dump_path is not None:
+            runtime_tracer.dump_csv(tracer_dump_path)
 
 
 __all__ = ["run_engine"]
