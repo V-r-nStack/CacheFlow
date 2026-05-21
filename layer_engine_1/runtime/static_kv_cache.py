@@ -72,5 +72,10 @@ class StaticKVCache:
         for slot_index in slot_indices:
             self.free_slot(slot_index)
 
+    def free_slots_count(self) -> int:
+        """Return the number of available KV cache slots."""
+
+        return len(self.free_pool)
+
 
 __all__ = ["StaticKVCache"]

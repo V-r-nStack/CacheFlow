@@ -113,7 +113,12 @@ class Scheduler:
             f"{sequence.seq_id} finished | TTFT: {ttft_text} | Total latency: {total_text}"
         )
 
-    def schedule_next_iteration(self, policy: str = "fcfs") -> List[Sequence]:
+    def schedule_next_iteration(
+        self,
+        policy: str = "fcfs",
+        static_kv_cache: Optional[StaticKVCache] = None,
+        min_decode_tokens: int = 50,
+    ) -> List[Sequence]:
         """Promote waiting requests into the active batch.
 
         Supported policies:
@@ -121,8 +126,11 @@ class Scheduler:
         - ``shortest_prompt_first``: order by prompt token length, then arrival
 
         The method first evicts completed active requests, then fills any free
-        capacity up to ``max_batch_size``. If the waiting queue is empty, the
-        method simply returns the current active batch state after eviction.
+        capacity up to ``max_batch_size``. If a ``static_kv_cache`` is provided,
+        the scheduler enforces memory-aware admission control by requiring enough
+        free slots for ``prompt_len + min_decode_tokens``. If the waiting queue is
+        empty, the method simply returns the current active batch state after
+        eviction.
         """
 
         normalized_policy = str(policy).strip().lower()
@@ -153,7 +161,26 @@ class Scheduler:
                 "policy must be either 'fcfs' or 'shortest_prompt_first'"
             )
 
-        promoted_sequences = ordered_waiting_queue[:available_capacity]
+        free_slots = None
+        if static_kv_cache is not None:
+            if not isinstance(static_kv_cache, StaticKVCache):
+                raise TypeError("static_kv_cache must be a StaticKVCache instance")
+            free_slots = static_kv_cache.free_slots_count()
+
+        promoted_sequences: List[Sequence] = []
+        for sequence in ordered_waiting_queue:
+            if len(promoted_sequences) >= available_capacity:
+                break
+            if free_slots is not None:
+                required_slots = len(sequence.prompt_token_ids) + int(min_decode_tokens)
+                if required_slots > free_slots:
+                    continue
+                free_slots -= required_slots
+            promoted_sequences.append(sequence)
+
+        if not promoted_sequences:
+            return self.active_batch
+
         promoted_ids = {id(sequence) for sequence in promoted_sequences}
 
         with self._waiting_lock:
