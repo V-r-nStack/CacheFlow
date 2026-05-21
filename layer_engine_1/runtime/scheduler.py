@@ -5,6 +5,7 @@ It does not perform model execution, tensor allocation, or KV-cache access.
 """
 
 from typing import List, Optional
+import threading
 
 from runtime.sequence import Sequence, SequenceStatus
 from runtime.static_kv_cache import StaticKVCache
@@ -30,6 +31,7 @@ class Scheduler:
         self.max_batch_size = max_batch_size
         self.waiting_queue: List[Sequence] = []
         self.active_batch: List[Sequence] = []
+        self._waiting_lock = threading.Lock()
 
     def add_request(self, sequence: Sequence) -> None:
         """Ingest a new Sequence object into the waiting queue."""
@@ -37,7 +39,13 @@ class Scheduler:
         if not isinstance(sequence, Sequence):
             raise TypeError("sequence must be a Sequence instance")
 
-        self.waiting_queue.append(sequence)
+        with self._waiting_lock:
+            self.waiting_queue.append(sequence)
+
+    def enqueue_request(self, sequence: Sequence) -> None:
+        """Thread-safe alias for add_request."""
+
+        self.add_request(sequence)
 
     def _evict_completed(self) -> List[Sequence]:
         """Remove FINISHED sequences from the active batch.
@@ -121,17 +129,19 @@ class Scheduler:
         self._evict_completed()
 
         available_capacity = self.max_batch_size - len(self.active_batch)
-        if available_capacity <= 0 or not self.waiting_queue:
-            return self.active_batch
+        with self._waiting_lock:
+            if available_capacity <= 0 or not self.waiting_queue:
+                return self.active_batch
+            waiting_snapshot = list(self.waiting_queue)
 
         if normalized_policy == "fcfs":
             ordered_waiting_queue = sorted(
-                self.waiting_queue,
+                waiting_snapshot,
                 key=lambda sequence: (sequence.arrival_time, sequence.seq_id),
             )
         elif normalized_policy == "shortest_prompt_first":
             ordered_waiting_queue = sorted(
-                self.waiting_queue,
+                waiting_snapshot,
                 key=lambda sequence: (
                     len(sequence.prompt_token_ids),
                     sequence.arrival_time,
@@ -146,9 +156,10 @@ class Scheduler:
         promoted_sequences = ordered_waiting_queue[:available_capacity]
         promoted_ids = {id(sequence) for sequence in promoted_sequences}
 
-        self.waiting_queue = [
-            sequence for sequence in self.waiting_queue if id(sequence) not in promoted_ids
-        ]
+        with self._waiting_lock:
+            self.waiting_queue = [
+                sequence for sequence in self.waiting_queue if id(sequence) not in promoted_ids
+            ]
         self.active_batch.extend(promoted_sequences)
         return self.active_batch
 

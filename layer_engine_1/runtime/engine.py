@@ -52,9 +52,13 @@ def _assign_prompt_slots(
     sequence: Sequence,
     static_kv_cache: StaticKVCache,
     prompt_len: int,
-) -> None:
+) -> bool:
     while len(sequence.kv_slot_indices) < prompt_len:
-        sequence.append_kv_slot_index(static_kv_cache.allocate_slot())
+        try:
+            sequence.append_kv_slot_index(static_kv_cache.allocate_slot())
+        except RuntimeError:
+            return False
+    return True
 
 
 def run_engine(
@@ -95,7 +99,10 @@ def run_engine(
                 continue
 
             if generated_len == 0:
-                _assign_prompt_slots(sequence, static_kv_cache, prompt_len)
+                if not _assign_prompt_slots(sequence, static_kv_cache, prompt_len):
+                    sequence.status = SequenceStatus.FINISHED
+                    sequence.finish_time = time.time()
+                    continue
                 input_ids = torch.tensor(
                     sequence.prompt_token_ids, dtype=torch.long, device=device
                 ).unsqueeze(0)
@@ -141,7 +148,12 @@ def run_engine(
             )
 
             sequence.generated_token_ids.append(next_token_id)
-            sequence.append_kv_slot_index(static_kv_cache.allocate_slot())
+            try:
+                sequence.append_kv_slot_index(static_kv_cache.allocate_slot())
+            except RuntimeError:
+                sequence.status = SequenceStatus.FINISHED
+                sequence.finish_time = time.time()
+                continue
 
             if max_seq_len is not None and sequence.logical_length >= max_seq_len:
                 sequence.status = SequenceStatus.FINISHED
