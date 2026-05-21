@@ -118,6 +118,8 @@ class Scheduler:
         policy: str = "fcfs",
         static_kv_cache: Optional[StaticKVCache] = None,
         min_decode_tokens: int = 50,
+        preempt_waiting_threshold: Optional[int] = None,
+        preempt_long_context_tokens: Optional[int] = None,
     ) -> List[Sequence]:
         """Promote waiting requests into the active batch.
 
@@ -128,13 +130,24 @@ class Scheduler:
         The method first evicts completed active requests, then fills any free
         capacity up to ``max_batch_size``. If a ``static_kv_cache`` is provided,
         the scheduler enforces memory-aware admission control by requiring enough
-        free slots for ``prompt_len + min_decode_tokens``. If the waiting queue is
-        empty, the method simply returns the current active batch state after
-        eviction.
+        free slots for ``prompt_len + min_decode_tokens``. Optional starvation
+        control can preempt long-context sequences when the waiting queue grows
+        beyond ``preempt_waiting_threshold``. If the waiting queue is empty, the
+        method simply returns the current active batch state after eviction.
         """
 
         normalized_policy = str(policy).strip().lower()
         self._evict_completed()
+
+        if preempt_waiting_threshold is not None and preempt_long_context_tokens is not None:
+            if static_kv_cache is None:
+                raise ValueError("static_kv_cache is required for preemption")
+            self.step_preemption(
+                static_kv_cache=static_kv_cache,
+                waiting_threshold=preempt_waiting_threshold,
+                long_context_tokens=preempt_long_context_tokens,
+                min_decode_tokens=min_decode_tokens,
+            )
 
         available_capacity = self.max_batch_size - len(self.active_batch)
         with self._waiting_lock:
@@ -189,6 +202,72 @@ class Scheduler:
             ]
         self.active_batch.extend(promoted_sequences)
         return self.active_batch
+
+    def step_preemption(
+        self,
+        static_kv_cache: StaticKVCache,
+        waiting_threshold: int,
+        long_context_tokens: int,
+        min_decode_tokens: int = 50,
+    ) -> Optional[Sequence]:
+        """Preempt a long-running sequence to admit a shorter waiting request.
+
+        Returns the preempted sequence when a preemption occurs, otherwise None.
+        """
+
+        if not isinstance(static_kv_cache, StaticKVCache):
+            raise TypeError("static_kv_cache must be a StaticKVCache instance")
+
+        waiting_threshold = int(waiting_threshold)
+        long_context_tokens = int(long_context_tokens)
+        if waiting_threshold < 0 or long_context_tokens <= 0:
+            return None
+
+        with self._waiting_lock:
+            waiting_depth = len(self.waiting_queue)
+            waiting_snapshot = list(self.waiting_queue)
+
+        if waiting_depth <= waiting_threshold:
+            return None
+
+        preempt_candidate = None
+        preempt_len = -1
+        for sequence in self.active_batch:
+            if sequence.status != SequenceStatus.RUNNING:
+                continue
+            generated_len = len(sequence.generated_token_ids)
+            if generated_len >= long_context_tokens and generated_len > preempt_len:
+                preempt_candidate = sequence
+                preempt_len = generated_len
+
+        if preempt_candidate is None:
+            return None
+
+        self.active_batch = [
+            sequence for sequence in self.active_batch if sequence is not preempt_candidate
+        ]
+        preempt_candidate.status = SequenceStatus.PREEMPTED
+        static_kv_cache.return_slots(preempt_candidate.kv_slot_indices)
+        preempt_candidate.clear_kv_slot_indices()
+
+        free_slots = static_kv_cache.free_slots_count()
+        admissible = []
+        for sequence in sorted(waiting_snapshot, key=lambda seq: len(seq.prompt_token_ids)):
+            required_slots = len(sequence.prompt_token_ids) + int(min_decode_tokens)
+            if required_slots <= free_slots:
+                admissible.append(sequence)
+                free_slots -= required_slots
+                break
+
+        if admissible:
+            admitted = admissible[0]
+            with self._waiting_lock:
+                self.waiting_queue = [
+                    sequence for sequence in self.waiting_queue if sequence is not admitted
+                ]
+            self.active_batch.append(admitted)
+
+        return preempt_candidate
 
 
 __all__ = ["Scheduler"]
