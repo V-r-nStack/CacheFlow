@@ -46,7 +46,15 @@ class GPT(nn.Module):
 
         self.lm_head.weight = self.token_emb.weight
 
-    def forward(self, idx, kv_cache=None, static_kv_cache=None, slot_mapping=None):
+    def forward(
+        self,
+        idx,
+        kv_cache=None,
+        static_kv_cache=None,
+        slot_mapping=None,
+        memory_manager=None,
+        sequence_id=None,
+    ):
         """Return per-token logits for the full context."""
 
         batch_size, seq_len = idx.shape
@@ -63,6 +71,11 @@ class GPT(nn.Module):
             if slot_mapping.size(1) < seq_len:
                 raise ValueError("slot_mapping length must be >= input sequence length")
             past_seq_len = slot_mapping.size(1) - seq_len
+        elif static_kv_cache is not None and memory_manager is not None and sequence_id is not None:
+            mapping_len = len(memory_manager.get_mapping_by_id(sequence_id))
+            if mapping_len < seq_len:
+                raise ValueError("memory manager mapping length must be >= input sequence length")
+            past_seq_len = mapping_len - seq_len
         elif kv_cache is not None:
             past_key, _ = kv_cache.get_layer(0)
             if past_key is not None:
@@ -85,6 +98,8 @@ class GPT(nn.Module):
                 layer_idx=layer_idx,
                 static_kv_cache=static_kv_cache,
                 slot_mapping=slot_mapping,
+                memory_manager=memory_manager,
+                sequence_id=sequence_id,
             )
 
         x = self.final_norm(x)

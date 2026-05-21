@@ -7,7 +7,10 @@ execution logic. It only tracks per-request metadata and token IDs.
 from dataclasses import dataclass, field
 from enum import Enum
 from time import time
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from runtime.memory_manager import MemoryManager
 
 
 class SequenceStatus(str, Enum):
@@ -27,18 +30,13 @@ class Sequence:
     manage prompt replay, decoding, and bookkeeping without coupling this object
     to any model execution code.
 
-    The `kv_slot_indices` list stores the physical row indices assigned from a
-    pre-allocated master KV cache tensor. Its order matches token order: entry 0
-    maps to the first logical token in the sequence, entry 1 maps to the second
-    logical token, and so on. A future PagedAttention runtime can use this as a
-    logical-to-physical indirection layer while evicting or remapping rows in the
-    shared cache.
+    Logical tokens are mapped to physical KV slots through the MemoryManager,
+    keeping raw slot indices out of this state object.
     """
 
     seq_id: int
     prompt_token_ids: List[int] = field(default_factory=list)
     generated_token_ids: List[int] = field(default_factory=list)
-    kv_slot_indices: List[int] = field(default_factory=list)
     arrival_time: float = field(default_factory=time)
     finish_time: Optional[float] = None
     ttft_s: Optional[float] = None
@@ -51,15 +49,15 @@ class Sequence:
 
         return len(self.prompt_token_ids) + len(self.generated_token_ids)
 
-    def append_kv_slot_index(self, slot_index: int) -> None:
-        """Record the physical KV cache row for the next logical token."""
+    def request_blocks(self, memory_manager: "MemoryManager", target_len: int) -> bool:
+        """Ensure the sequence has a logical-to-physical mapping of target_len."""
 
-        self.kv_slot_indices.append(int(slot_index))
+        return memory_manager.ensure_mapping_length(self, target_len)
 
-    def clear_kv_slot_indices(self) -> None:
-        """Drop all slot mappings when the request is preempted or finished."""
+    def release_blocks(self, memory_manager: "MemoryManager") -> None:
+        """Release all mapped blocks for this sequence via the memory manager."""
 
-        self.kv_slot_indices.clear()
+        memory_manager.release_sequence(self)
 
 
 InferenceRequest = Sequence

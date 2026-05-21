@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
+from runtime.memory_manager import MemoryManager
 from runtime.static_kv_cache import StaticKVCache
 
 
@@ -35,6 +36,8 @@ class CausalMultiHeadAttention(nn.Module):
         layer_idx=None,
         static_kv_cache: Optional[StaticKVCache] = None,
         slot_mapping: Optional[torch.Tensor] = None,
+        memory_manager: Optional[MemoryManager] = None,
+        sequence_id: Optional[int] = None,
     ):
         """Apply causal attention with optional KV cache support."""
 
@@ -46,9 +49,16 @@ class CausalMultiHeadAttention(nn.Module):
 
         query, key, value = qkv[0], qkv[1], qkv[2]
 
-        if static_kv_cache is not None or slot_mapping is not None:
-            if static_kv_cache is None or slot_mapping is None:
-                raise ValueError("static_kv_cache and slot_mapping must be provided together")
+        if static_kv_cache is not None or slot_mapping is not None or memory_manager is not None:
+            if static_kv_cache is None:
+                raise ValueError("static_kv_cache must be provided when using slot mapping")
+            if memory_manager is not None and sequence_id is not None and batch_size == 1:
+                mapping_list = memory_manager.get_mapping_by_id(sequence_id)
+                slot_mapping = torch.tensor(
+                    mapping_list, dtype=torch.long, device=x.device
+                ).unsqueeze(0)
+            elif slot_mapping is None:
+                raise ValueError("slot_mapping must be provided without memory_manager mapping")
             if layer_idx is None:
                 raise ValueError("layer_idx must be provided when static_kv_cache is used")
 

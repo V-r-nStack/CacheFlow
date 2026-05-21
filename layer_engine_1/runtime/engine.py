@@ -10,9 +10,9 @@ from typing import List, Optional
 import torch
 
 from runtime.batching import prepare_continuous_batch
+from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
-from runtime.static_kv_cache import StaticKVCache
 
 
 def _sample_next_token(
@@ -52,21 +52,16 @@ def _sample_next_token(
 
 def _assign_prompt_slots(
     sequence: Sequence,
-    static_kv_cache: StaticKVCache,
+    memory_manager: MemoryManager,
     prompt_len: int,
 ) -> bool:
-    while len(sequence.kv_slot_indices) < prompt_len:
-        try:
-            sequence.append_kv_slot_index(static_kv_cache.allocate_slot())
-        except RuntimeError:
-            return False
-    return True
+    return sequence.request_blocks(memory_manager, prompt_len)
 
 
 def run_engine(
     model,
     scheduler: Scheduler,
-    static_kv_cache: StaticKVCache,
+    memory_manager: MemoryManager,
     eos_token_id: int = 50256,
     max_seq_len: Optional[int] = None,
     temperature: float = 1.0,
@@ -81,6 +76,7 @@ def run_engine(
         max_seq_len = int(model.max_seq_len)
 
     device = next(model.parameters()).device
+    static_kv_cache = memory_manager.static_kv_cache
 
     metrics_writer = None
     metrics_file = None
@@ -103,8 +99,8 @@ def run_engine(
 
     try:
         while scheduler.waiting_queue or scheduler.active_batch:
-            scheduler.step_eviction(static_kv_cache)
-            scheduler.schedule_next_iteration(policy=policy)
+            scheduler.step_eviction(memory_manager)
+            scheduler.schedule_next_iteration(policy=policy, memory_manager=memory_manager)
 
             if not scheduler.active_batch:
                 if metrics_writer is not None:
@@ -140,38 +136,30 @@ def run_engine(
                     continue
 
                 if generated_len == 0:
-                    if not _assign_prompt_slots(sequence, static_kv_cache, prompt_len):
+                    if not _assign_prompt_slots(sequence, memory_manager, prompt_len):
                         sequence.status = SequenceStatus.FINISHED
                         sequence.finish_time = time.time()
                         continue
                     input_ids = torch.tensor(
                         sequence.prompt_token_ids, dtype=torch.long, device=device
                     ).unsqueeze(0)
-                    slot_mapping = torch.tensor(
-                        sequence.kv_slot_indices[:prompt_len],
-                        dtype=torch.long,
-                        device=device,
-                    ).unsqueeze(0)
                 else:
-                    if len(sequence.kv_slot_indices) < logical_len:
-                        raise ValueError("kv_slot_indices length is behind logical length")
+                    mapping_list = memory_manager.get_mapping(sequence)
+                    if len(mapping_list) < logical_len:
+                        raise ValueError("memory manager mapping is behind logical length")
 
                     input_ids = torch.tensor(
                         [sequence.generated_token_ids[-1]], dtype=torch.long, device=device
                     ).unsqueeze(0)
-                    slot_mapping = torch.tensor(
-                        sequence.kv_slot_indices[:logical_len],
-                        dtype=torch.long,
-                        device=device,
-                    ).unsqueeze(0)
 
                 start_time = time.perf_counter()
                 with torch.inference_mode():
-                    _ = prepare_continuous_batch([sequence], device=device)
+                    _ = prepare_continuous_batch([sequence], memory_manager, device=device)
                     logits = model(
                         input_ids,
                         static_kv_cache=static_kv_cache,
-                        slot_mapping=slot_mapping,
+                        memory_manager=memory_manager,
+                        sequence_id=sequence.seq_id,
                     )
                 elapsed = time.perf_counter() - start_time
 
@@ -189,9 +177,7 @@ def run_engine(
                 )
 
                 sequence.generated_token_ids.append(next_token_id)
-                try:
-                    sequence.append_kv_slot_index(static_kv_cache.allocate_slot())
-                except RuntimeError:
+                if not memory_manager.allocate_for_sequence(sequence, 1):
                     sequence.status = SequenceStatus.FINISHED
                     sequence.finish_time = time.time()
                     continue

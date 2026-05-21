@@ -7,8 +7,8 @@ It does not perform model execution, tensor allocation, or KV-cache access.
 from typing import List, Optional
 import threading
 
+from runtime.memory_manager import MemoryManager
 from runtime.sequence import Sequence, SequenceStatus
-from runtime.static_kv_cache import StaticKVCache
 
 
 class Scheduler:
@@ -66,11 +66,11 @@ class Scheduler:
         self.active_batch = remaining_active_batch
         return evicted_sequences
 
-    def step_eviction(self, static_kv_cache: StaticKVCache) -> List[Sequence]:
+    def step_eviction(self, memory_manager: MemoryManager) -> List[Sequence]:
         """Evict FINISHED sequences, return KV slots, and log latency stats."""
 
-        if not isinstance(static_kv_cache, StaticKVCache):
-            raise TypeError("static_kv_cache must be a StaticKVCache instance")
+        if not isinstance(memory_manager, MemoryManager):
+            raise TypeError("memory_manager must be a MemoryManager instance")
 
         evicted_sequences: List[Sequence] = []
         remaining_active_batch: List[Sequence] = []
@@ -80,8 +80,7 @@ class Scheduler:
                 remaining_active_batch.append(sequence)
                 continue
 
-            static_kv_cache.return_slots(sequence.kv_slot_indices)
-            sequence.clear_kv_slot_indices()
+            sequence.release_blocks(memory_manager)
 
             ttft_s = sequence.ttft_s
             total_latency_s = self._resolve_total_latency(sequence)
@@ -116,7 +115,7 @@ class Scheduler:
     def schedule_next_iteration(
         self,
         policy: str = "fcfs",
-        static_kv_cache: Optional[StaticKVCache] = None,
+        memory_manager: Optional[MemoryManager] = None,
         min_decode_tokens: int = 50,
         preempt_waiting_threshold: Optional[int] = None,
         preempt_long_context_tokens: Optional[int] = None,
@@ -128,7 +127,7 @@ class Scheduler:
         - ``shortest_prompt_first``: order by prompt token length, then arrival
 
         The method first evicts completed active requests, then fills any free
-        capacity up to ``max_batch_size``. If a ``static_kv_cache`` is provided,
+        capacity up to ``max_batch_size``. If a ``memory_manager`` is provided,
         the scheduler enforces memory-aware admission control by requiring enough
         free slots for ``prompt_len + min_decode_tokens``. Optional starvation
         control can preempt long-context sequences when the waiting queue grows
@@ -140,10 +139,10 @@ class Scheduler:
         self._evict_completed()
 
         if preempt_waiting_threshold is not None and preempt_long_context_tokens is not None:
-            if static_kv_cache is None:
-                raise ValueError("static_kv_cache is required for preemption")
+            if memory_manager is None:
+                raise ValueError("memory_manager is required for preemption")
             self.step_preemption(
-                static_kv_cache=static_kv_cache,
+                memory_manager=memory_manager,
                 waiting_threshold=preempt_waiting_threshold,
                 long_context_tokens=preempt_long_context_tokens,
                 min_decode_tokens=min_decode_tokens,
@@ -175,10 +174,10 @@ class Scheduler:
             )
 
         free_slots = None
-        if static_kv_cache is not None:
-            if not isinstance(static_kv_cache, StaticKVCache):
-                raise TypeError("static_kv_cache must be a StaticKVCache instance")
-            free_slots = static_kv_cache.free_slots_count()
+        if memory_manager is not None:
+            if not isinstance(memory_manager, MemoryManager):
+                raise TypeError("memory_manager must be a MemoryManager instance")
+            free_slots = memory_manager.free_slots_count()
 
         promoted_sequences: List[Sequence] = []
         for sequence in ordered_waiting_queue:
@@ -205,7 +204,7 @@ class Scheduler:
 
     def step_preemption(
         self,
-        static_kv_cache: StaticKVCache,
+        memory_manager: MemoryManager,
         waiting_threshold: int,
         long_context_tokens: int,
         min_decode_tokens: int = 50,
@@ -215,8 +214,8 @@ class Scheduler:
         Returns the preempted sequence when a preemption occurs, otherwise None.
         """
 
-        if not isinstance(static_kv_cache, StaticKVCache):
-            raise TypeError("static_kv_cache must be a StaticKVCache instance")
+        if not isinstance(memory_manager, MemoryManager):
+            raise TypeError("memory_manager must be a MemoryManager instance")
 
         waiting_threshold = int(waiting_threshold)
         long_context_tokens = int(long_context_tokens)
@@ -247,10 +246,9 @@ class Scheduler:
             sequence for sequence in self.active_batch if sequence is not preempt_candidate
         ]
         preempt_candidate.status = SequenceStatus.PREEMPTED
-        static_kv_cache.return_slots(preempt_candidate.kv_slot_indices)
-        preempt_candidate.clear_kv_slot_indices()
+        preempt_candidate.release_blocks(memory_manager)
 
-        free_slots = static_kv_cache.free_slots_count()
+        free_slots = memory_manager.free_slots_count()
         admissible = []
         for sequence in sorted(waiting_snapshot, key=lambda seq: len(seq.prompt_token_ids)):
             required_slots = len(sequence.prompt_token_ids) + int(min_decode_tokens)

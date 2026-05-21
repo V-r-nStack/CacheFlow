@@ -4,11 +4,13 @@ from typing import Dict, List, Optional
 
 import torch
 
+from runtime.memory_manager import MemoryManager
 from runtime.sequence import Sequence
 
 
 def prepare_continuous_batch(
     active_sequences: List[Sequence],
+    memory_manager: MemoryManager,
     device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
     """Prepare flat inputs and slot mappings for a mixed prefill/decode batch.
@@ -46,9 +48,10 @@ def prepare_continuous_batch(
 
         if logical_len == 0:
             raise ValueError("Sequence has no prompt or generated tokens")
-        if len(sequence.kv_slot_indices) < logical_len:
+        slot_mapping_list = memory_manager.get_mapping(sequence)
+        if len(slot_mapping_list) < logical_len:
             raise ValueError(
-                "kv_slot_indices length must cover the logical sequence length"
+                "memory manager mapping must cover the logical sequence length"
             )
 
         if generated_len == 0:
@@ -62,9 +65,7 @@ def prepare_continuous_batch(
                 [prompt_len + generated_len - 1], dtype=torch.long
             )
 
-        slot_mapping = torch.tensor(
-            sequence.kv_slot_indices[:logical_len], dtype=torch.long
-        )
+        slot_mapping = torch.tensor(slot_mapping_list[:logical_len], dtype=torch.long)
 
         input_offsets.append(input_cursor)
         slot_offsets.append(slot_cursor)

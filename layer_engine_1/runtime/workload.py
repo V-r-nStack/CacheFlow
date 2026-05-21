@@ -9,15 +9,15 @@ import time
 from typing import Iterable, List, Optional, Sequence as SeqType
 
 from runtime.engine import run_engine
+from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence
-from runtime.static_kv_cache import StaticKVCache
 
 
 def start_engine_background(
     model,
     scheduler: Scheduler,
-    static_kv_cache: StaticKVCache,
+    memory_manager: MemoryManager,
     stop_event: threading.Event,
     **engine_kwargs,
 ) -> threading.Thread:
@@ -26,7 +26,7 @@ def start_engine_background(
     def _worker():
         while not stop_event.is_set():
             if scheduler.waiting_queue or scheduler.active_batch:
-                run_engine(model, scheduler, static_kv_cache, **engine_kwargs)
+                run_engine(model, scheduler, memory_manager, **engine_kwargs)
             else:
                 time.sleep(0.001)
 
