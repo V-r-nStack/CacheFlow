@@ -197,6 +197,9 @@ def run_engine(
                 if max_seq_len is not None and sequence.logical_length >= max_seq_len:
                     sequence.status = SequenceStatus.FINISHED
                     sequence.finish_time = time.time()
+                elif sequence.decode_limit is not None and len(sequence.generated_token_ids) >= sequence.decode_limit:
+                    sequence.status = SequenceStatus.FINISHED
+                    sequence.finish_time = time.time()
                 elif next_token_id == eos_token_id:
                     sequence.status = SequenceStatus.FINISHED
                     sequence.finish_time = time.time()

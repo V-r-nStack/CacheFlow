@@ -41,6 +41,7 @@ class Sequence:
     finish_time: Optional[float] = None
     ttft_s: Optional[float] = None
     total_latency_s: Optional[float] = None
+    decode_limit: Optional[int] = None
     status: SequenceStatus = SequenceStatus.WAITING
 
     @property

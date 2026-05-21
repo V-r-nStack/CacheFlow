@@ -6,12 +6,59 @@ import asyncio
 import random
 import threading
 import time
+from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence as SeqType
 
 from runtime.engine import run_engine
 from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence
+
+
+@dataclass(frozen=True)
+class WorkloadProfile:
+    name: str
+    base_rate: float
+    burst_rate: float
+    burst_prob: float
+    prompt_lengths: List[int]
+    prompt_weights: List[float]
+    min_decode_tokens: int
+    max_decode_tokens: int
+
+
+WORKLOAD_PROFILES = {
+    "bursty_chat": WorkloadProfile(
+        name="bursty_chat",
+        base_rate=40.0,
+        burst_rate=120.0,
+        burst_prob=0.6,
+        prompt_lengths=[20, 30, 40, 50],
+        prompt_weights=[0.25, 0.25, 0.25, 0.25],
+        min_decode_tokens=50,
+        max_decode_tokens=100,
+    ),
+    "heavy_document_qa": WorkloadProfile(
+        name="heavy_document_qa",
+        base_rate=2.0,
+        burst_rate=5.0,
+        burst_prob=0.2,
+        prompt_lengths=[1000, 1500, 2000],
+        prompt_weights=[0.4, 0.3, 0.3],
+        min_decode_tokens=10,
+        max_decode_tokens=30,
+    ),
+    "mixed_contention": WorkloadProfile(
+        name="mixed_contention",
+        base_rate=20.0,
+        burst_rate=80.0,
+        burst_prob=0.5,
+        prompt_lengths=[20, 30, 40, 50, 1000, 1500, 2000],
+        prompt_weights=[0.125, 0.125, 0.125, 0.125, 0.166, 0.167, 0.167],
+        min_decode_tokens=10,
+        max_decode_tokens=100,
+    ),
+}
 
 
 def start_engine_background(
@@ -67,6 +114,10 @@ def _build_prompt_tokens(prompt_len: int, vocab_size: int) -> List[int]:
     return [random.randrange(vocab_size) for _ in range(prompt_len)]
 
 
+def _sample_decode_limit(min_decode: int, max_decode: int) -> int:
+    return int(random.randint(min_decode, max_decode))
+
+
 async def run_synthetic_workload(
     scheduler: Scheduler,
     duration_s: float,
@@ -77,8 +128,20 @@ async def run_synthetic_workload(
     prompt_lengths: Optional[Iterable[int]] = None,
     prompt_weights: Optional[Iterable[float]] = None,
     stop_event: Optional[threading.Event] = None,
+    profile: Optional[str] = None,
 ) -> None:
     """Generate requests asynchronously using Poisson inter-arrival times."""
+
+    selected_profile = None
+    if profile is not None:
+        selected_profile = WORKLOAD_PROFILES.get(profile)
+        if selected_profile is None:
+            raise ValueError(f"Unknown workload profile: {profile}")
+        base_rate = selected_profile.base_rate
+        burst_rate = selected_profile.burst_rate
+        burst_prob = selected_profile.burst_prob
+        prompt_lengths = selected_profile.prompt_lengths
+        prompt_weights = selected_profile.prompt_weights
 
     if prompt_lengths is None:
         prompt_lengths = [20, 64, 128, 256, 500]
@@ -103,7 +166,17 @@ async def run_synthetic_workload(
             prompt_len = _sample_prompt_length(prompt_lengths, prompt_weights)
             prompt_tokens = _build_prompt_tokens(prompt_len, vocab_size)
 
+            if selected_profile is not None:
+                decode_limit = _sample_decode_limit(
+                    selected_profile.min_decode_tokens,
+                    selected_profile.max_decode_tokens,
+                )
+            else:
+                decode_limit = 0
+
             sequence = Sequence(seq_id=seq_id, prompt_token_ids=prompt_tokens)
+            if decode_limit > 0:
+                sequence.decode_limit = decode_limit
             scheduler.enqueue_request(sequence)
     except asyncio.CancelledError:
         print("[INFO] workload generator cancelled")
@@ -114,4 +187,6 @@ __all__ = [
     "run_synthetic_workload",
     "start_engine_background",
     "stop_engine_background",
+    "WorkloadProfile",
+    "WORKLOAD_PROFILES",
 ]
