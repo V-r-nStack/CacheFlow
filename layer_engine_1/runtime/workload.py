@@ -24,15 +24,39 @@ def start_engine_background(
     """Run the engine loop in a background thread until stop_event is set."""
 
     def _worker():
-        while not stop_event.is_set():
-            if scheduler.waiting_queue or scheduler.active_batch:
-                run_engine(model, scheduler, memory_manager, **engine_kwargs)
-            else:
-                time.sleep(0.001)
+        try:
+            while not stop_event.is_set():
+                if scheduler.waiting_queue or scheduler.active_batch:
+                    run_engine(
+                        model,
+                        scheduler,
+                        memory_manager,
+                        stop_event=stop_event,
+                        **engine_kwargs,
+                    )
+                else:
+                    time.sleep(0.001)
+        except Exception as exc:
+            print(f"[WARN] engine background thread exception: {exc}")
+        finally:
+            print("[INFO] engine background thread stopped")
 
-    thread = threading.Thread(target=_worker, daemon=True)
+    thread = threading.Thread(target=_worker, daemon=False, name="engine-background")
     thread.start()
     return thread
+
+
+def stop_engine_background(
+    stop_event: threading.Event,
+    thread: threading.Thread,
+    timeout_s: float = 2.0,
+) -> None:
+    """Signal the background thread to stop and join it."""
+
+    stop_event.set()
+    thread.join(timeout=timeout_s)
+    if thread.is_alive():
+        print("[WARN] engine background thread did not stop in time")
 
 
 def _sample_prompt_length(prompt_lengths: SeqType[int], weights: SeqType[float]) -> int:
@@ -52,6 +76,7 @@ async def run_synthetic_workload(
     vocab_size: int = 50257,
     prompt_lengths: Optional[Iterable[int]] = None,
     prompt_weights: Optional[Iterable[float]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     """Generate requests asynchronously using Poisson inter-arrival times."""
 
@@ -66,17 +91,27 @@ async def run_synthetic_workload(
     end_time = time.monotonic() + float(duration_s)
     seq_id = 0
 
-    while time.monotonic() < end_time:
-        rate = burst_rate if random.random() < burst_prob else base_rate
-        rate = max(rate, 1e-6)
-        await asyncio.sleep(random.expovariate(rate))
+    try:
+        while time.monotonic() < end_time:
+            if stop_event is not None and stop_event.is_set():
+                break
+            rate = burst_rate if random.random() < burst_prob else base_rate
+            rate = max(rate, 1e-6)
+            await asyncio.sleep(random.expovariate(rate))
 
-        seq_id += 1
-        prompt_len = _sample_prompt_length(prompt_lengths, prompt_weights)
-        prompt_tokens = _build_prompt_tokens(prompt_len, vocab_size)
+            seq_id += 1
+            prompt_len = _sample_prompt_length(prompt_lengths, prompt_weights)
+            prompt_tokens = _build_prompt_tokens(prompt_len, vocab_size)
 
-        sequence = Sequence(seq_id=seq_id, prompt_token_ids=prompt_tokens)
-        scheduler.enqueue_request(sequence)
+            sequence = Sequence(seq_id=seq_id, prompt_token_ids=prompt_tokens)
+            scheduler.enqueue_request(sequence)
+    except asyncio.CancelledError:
+        print("[INFO] workload generator cancelled")
+        raise
 
 
-__all__ = ["run_synthetic_workload", "start_engine_background"]
+__all__ = [
+    "run_synthetic_workload",
+    "start_engine_background",
+    "stop_engine_background",
+]

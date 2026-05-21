@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import os
 import time
+import threading
 from typing import List, Optional
 
 import torch
@@ -72,6 +73,7 @@ def run_engine(
     metrics_path: Optional[str] = None,
     runtime_tracer: Optional[RuntimeTracer] = None,
     tracer_dump_path: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     """Run the continuous decoding loop until all work is complete."""
 
@@ -102,6 +104,8 @@ def run_engine(
 
     try:
         while scheduler.waiting_queue or scheduler.active_batch:
+            if stop_event is not None and stop_event.is_set():
+                break
             scheduler.step_eviction(memory_manager)
             scheduler.schedule_next_iteration(policy=policy, memory_manager=memory_manager)
 
@@ -131,6 +135,8 @@ def run_engine(
             total_itl_s = 0.0
 
             for sequence in scheduler.active_batch:
+                if stop_event is not None and stop_event.is_set():
+                    break
                 prompt_len = len(sequence.prompt_token_ids)
                 generated_len = len(sequence.generated_token_ids)
                 logical_len = prompt_len + generated_len
