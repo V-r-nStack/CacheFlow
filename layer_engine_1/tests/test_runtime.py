@@ -18,6 +18,7 @@ from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
 from runtime.static_kv_cache import StaticKVCache
+from runtime.tracer import RuntimeTracer
 from runtime.workload import (
     WORKLOAD_PROFILES,
     WorkloadProfile,
@@ -209,6 +210,52 @@ def test_engine_metrics_and_eviction() -> None:
     _log(f"[INFO] metrics_rows={len(rows) - 1} path={metrics_path}")
 
 
+def test_fairness_tracer_output() -> None:
+    model = DummyModel(vocab_size=128, max_seq_len=512)
+    cache = StaticKVCache(
+        max_batch_size=16,
+        max_seq_len=512,
+        num_layers=1,
+        num_heads=1,
+        head_dim=8,
+        device="cpu",
+        dtype=torch.float32,
+    )
+    memory_manager = MemoryManager(cache)
+    scheduler = Scheduler(max_batch_size=16)
+
+    for seq_id in range(1, 17):
+        prompt_tokens = [token_id % 128 for token_id in range(256)]
+        scheduler.add_request(Sequence(seq_id=seq_id, prompt_token_ids=prompt_tokens))
+
+    tracer_path = "/tmp/engine_fairness_metrics_test.csv"
+    if os.path.exists(tracer_path):
+        os.remove(tracer_path)
+
+    runtime_tracer = RuntimeTracer()
+    run_engine(
+        model,
+        scheduler,
+        memory_manager,
+        eos_token_id=-1,
+        max_seq_len=384,
+        top_k=10,
+        runtime_tracer=runtime_tracer,
+        tracer_dump_path=tracer_path,
+    )
+
+    assert os.path.exists(tracer_path)
+    with open(tracer_path, "r", newline="") as handle:
+        rows = list(csv.reader(handle))
+    assert len(rows) >= 2
+    header = {name.strip() for name in rows[0]}
+    assert "avg_wait_s" in header
+    assert "p95_wait_s" in header
+    assert "max_starvation_s" in header
+    assert "short_long_ratio" in header
+    _log(f"[INFO] fairness_rows={len(rows) - 1} path={tracer_path}")
+
+
 def test_async_workload_with_pressure() -> None:
     model = DummyModel(vocab_size=256, max_seq_len=4096)
     cache = StaticKVCache(
@@ -311,6 +358,7 @@ def run_all() -> None:
     _run_test("batch_prep_memory_manager", test_batch_prep_memory_manager)
     _run_test("scheduler_eviction_preemption", test_scheduler_eviction_and_preemption)
     _run_test("engine_metrics_eviction", test_engine_metrics_and_eviction)
+    _run_test("fairness_tracer_output", test_fairness_tracer_output)
     _run_test("async_workload_pressure", test_async_workload_with_pressure)
     _run_test("workload_profiles", test_workload_profiles)
     _run_test("scheduler_benchmark", benchmark_scheduler)
