@@ -4,8 +4,10 @@ This module stays strictly focused on request placement and batch bookkeeping.
 It does not perform model execution, tensor allocation, or KV-cache access.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
+import math
 import threading
+import time
 
 from runtime.memory_manager import MemoryManager
 from runtime.sequence import Sequence, SequenceStatus
@@ -31,6 +33,7 @@ class Scheduler:
         self.max_batch_size = max_batch_size
         self.waiting_queue: List[Sequence] = []
         self.active_batch: List[Sequence] = []
+        self.completed_sequences: List[Sequence] = []
         self._waiting_lock = threading.Lock()
 
     def add_request(self, sequence: Sequence) -> None:
@@ -39,6 +42,8 @@ class Scheduler:
         if not isinstance(sequence, Sequence):
             raise TypeError("sequence must be a Sequence instance")
 
+        now = time.time()
+        self._mark_wait_start(sequence, now)
         with self._waiting_lock:
             self.waiting_queue.append(sequence)
 
@@ -87,9 +92,82 @@ class Scheduler:
             self._log_sequence_latency(sequence, ttft_s, total_latency_s)
 
             evicted_sequences.append(sequence)
+            self.completed_sequences.append(sequence)
 
         self.active_batch = remaining_active_batch
         return evicted_sequences
+
+    @staticmethod
+    def _mark_wait_start(sequence: Sequence, now: float) -> None:
+        if sequence._wait_start_time is None:
+            sequence._wait_start_time = now
+
+    @staticmethod
+    def _mark_wait_end(sequence: Sequence, now: float) -> None:
+        if sequence._wait_start_time is not None:
+            sequence.total_wait_time += max(0.0, now - sequence._wait_start_time)
+            sequence._wait_start_time = None
+        if sequence._preempt_start_time is not None:
+            sequence.starvation_duration += max(0.0, now - sequence._preempt_start_time)
+            sequence._preempt_start_time = None
+        if sequence.status == SequenceStatus.PREEMPTED:
+            sequence.status = SequenceStatus.WAITING
+
+    def _gather_sequences(self) -> List[Sequence]:
+        sequences: List[Sequence] = []
+        seen_ids = set()
+        for sequence in self.waiting_queue + self.active_batch + self.completed_sequences:
+            seq_key = id(sequence)
+            if seq_key in seen_ids:
+                continue
+            seen_ids.add(seq_key)
+            sequences.append(sequence)
+        return sequences
+
+    def aggregate_fairness_metrics(self, short_prompt_threshold: int = 128) -> Dict[str, float]:
+        now = time.time()
+        wait_samples: List[float] = []
+        max_starvation = 0.0
+        for sequence in self._gather_sequences():
+            wait_time = sequence.total_wait_time
+            if sequence._wait_start_time is not None:
+                wait_time += max(0.0, now - sequence._wait_start_time)
+            if wait_time > 0.0:
+                wait_samples.append(wait_time)
+
+            starvation = sequence.starvation_duration
+            if sequence._preempt_start_time is not None:
+                starvation += max(0.0, now - sequence._preempt_start_time)
+            if starvation > max_starvation:
+                max_starvation = starvation
+
+        avg_wait = sum(wait_samples) / len(wait_samples) if wait_samples else 0.0
+        if wait_samples:
+            ordered = sorted(wait_samples)
+            idx = max(0, int(math.ceil(0.95 * len(ordered))) - 1)
+            p95_wait = ordered[idx]
+        else:
+            p95_wait = 0.0
+
+        short_count = 0
+        long_count = 0
+        for sequence in self.completed_sequences:
+            prompt_len = len(sequence.prompt_token_ids)
+            if prompt_len <= short_prompt_threshold:
+                short_count += 1
+            else:
+                long_count += 1
+        if long_count > 0:
+            short_long_ratio = short_count / float(long_count)
+        else:
+            short_long_ratio = 0.0
+
+        return {
+            "avg_wait_s": float(avg_wait),
+            "p95_wait_s": float(p95_wait),
+            "max_starvation_s": float(max_starvation),
+            "short_long_ratio": float(short_long_ratio),
+        }
 
     @staticmethod
     def _resolve_total_latency(sequence: Sequence) -> Optional[float]:
@@ -193,6 +271,10 @@ class Scheduler:
         if not promoted_sequences:
             return self.active_batch
 
+        now = time.time()
+        for sequence in promoted_sequences:
+            self._mark_wait_end(sequence, now)
+
         promoted_ids = {id(sequence) for sequence in promoted_sequences}
 
         with self._waiting_lock:
@@ -246,7 +328,13 @@ class Scheduler:
             sequence for sequence in self.active_batch if sequence is not preempt_candidate
         ]
         preempt_candidate.status = SequenceStatus.PREEMPTED
+        preempt_candidate.preemption_count += 1
         preempt_candidate.release_blocks(memory_manager)
+        now = time.time()
+        preempt_candidate._preempt_start_time = now
+        self._mark_wait_start(preempt_candidate, now)
+        with self._waiting_lock:
+            self.waiting_queue.append(preempt_candidate)
 
         free_slots = memory_manager.free_slots_count()
         admissible = []
@@ -263,6 +351,7 @@ class Scheduler:
                 self.waiting_queue = [
                     sequence for sequence in self.waiting_queue if sequence is not admitted
                 ]
+            self._mark_wait_end(admitted, now)
             self.active_batch.append(admitted)
 
         return preempt_candidate

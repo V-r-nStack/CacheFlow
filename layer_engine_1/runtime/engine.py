@@ -240,6 +240,7 @@ def run_engine(
             if runtime_tracer is not None:
                 free_slots = memory_manager.free_slots_count()
                 allocated_slots = static_kv_cache.total_slots - free_slots
+                fairness = scheduler.aggregate_fairness_metrics()
                 runtime_tracer.record_tick(
                     timestamp=time.time(),
                     queue_depth=queue_depth,
@@ -247,6 +248,10 @@ def run_engine(
                     allocated_kv_slots=allocated_slots,
                     free_kv_slots=free_slots,
                     itl_s=itl_s,
+                    avg_wait_s=fairness["avg_wait_s"],
+                    p95_wait_s=fairness["p95_wait_s"],
+                    max_starvation_s=fairness["max_starvation_s"],
+                    short_long_ratio=fairness["short_long_ratio"],
                 )
     finally:
         if metrics_file is not None:

@@ -43,6 +43,11 @@ class Sequence:
     total_latency_s: Optional[float] = None
     decode_limit: Optional[int] = None
     status: SequenceStatus = SequenceStatus.WAITING
+    total_wait_time: float = 0.0
+    starvation_duration: float = 0.0
+    preemption_count: int = 0
+    _wait_start_time: Optional[float] = None
+    _preempt_start_time: Optional[float] = None
 
     @property
     def logical_length(self) -> int:

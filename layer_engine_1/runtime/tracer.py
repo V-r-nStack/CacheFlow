@@ -22,6 +22,10 @@ class RuntimeTracer:
         allocated_kv_slots: int,
         free_kv_slots: int,
         itl_s: float,
+        avg_wait_s: Optional[float] = None,
+        p95_wait_s: Optional[float] = None,
+        max_starvation_s: Optional[float] = None,
+        short_long_ratio: Optional[float] = None,
     ) -> None:
         self._rows.append(
             {
@@ -31,6 +35,10 @@ class RuntimeTracer:
                 "allocated_kv_slots": int(allocated_kv_slots),
                 "free_kv_slots": int(free_kv_slots),
                 "itl_s": float(itl_s),
+                "avg_wait_s": None if avg_wait_s is None else float(avg_wait_s),
+                "p95_wait_s": None if p95_wait_s is None else float(p95_wait_s),
+                "max_starvation_s": None if max_starvation_s is None else float(max_starvation_s),
+                "short_long_ratio": None if short_long_ratio is None else float(short_long_ratio),
             }
         )
 
