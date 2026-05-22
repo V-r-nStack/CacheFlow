@@ -118,6 +118,31 @@ def _sample_decode_limit(min_decode: int, max_decode: int) -> int:
     return int(random.randint(min_decode, max_decode))
 
 
+def _sample_long_tail_decode(
+    light_range: SeqType[int],
+    heavy_range: SeqType[int],
+    heavy_prob: float,
+    distribution: str,
+) -> int:
+    use_heavy = random.random() < float(heavy_prob)
+    if use_heavy:
+        low, high = int(heavy_range[0]), int(heavy_range[1])
+    else:
+        low, high = int(light_range[0]), int(light_range[1])
+
+    distribution = distribution.strip().lower()
+    if distribution == "pareto":
+        alpha = 2.0
+        sample = low * random.paretovariate(alpha)
+        return int(min(sample, high))
+    if distribution == "lognormal":
+        sample = random.lognormvariate(0.0, 1.0)
+        normalized = sample / (sample + 1.0)
+        return int(low + normalized * (high - low))
+
+    raise ValueError("distribution must be 'pareto' or 'lognormal'")
+
+
 async def run_synthetic_workload(
     scheduler: Scheduler,
     duration_s: float,
@@ -127,6 +152,11 @@ async def run_synthetic_workload(
     vocab_size: int = 50257,
     prompt_lengths: Optional[Iterable[int]] = None,
     prompt_weights: Optional[Iterable[float]] = None,
+    use_long_tail_decode: bool = True,
+    long_tail_distribution: str = "pareto",
+    light_decode_range: SeqType[int] = (128, 512),
+    heavy_decode_range: SeqType[int] = (1024, 4096),
+    heavy_decode_prob: float = 0.2,
     stop_event: Optional[threading.Event] = None,
     profile: Optional[str] = None,
 ) -> None:
@@ -166,7 +196,14 @@ async def run_synthetic_workload(
             prompt_len = _sample_prompt_length(prompt_lengths, prompt_weights)
             prompt_tokens = _build_prompt_tokens(prompt_len, vocab_size)
 
-            if selected_profile is not None:
+            if use_long_tail_decode:
+                decode_limit = _sample_long_tail_decode(
+                    light_range=light_decode_range,
+                    heavy_range=heavy_decode_range,
+                    heavy_prob=heavy_decode_prob,
+                    distribution=long_tail_distribution,
+                )
+            elif selected_profile is not None:
                 decode_limit = _sample_decode_limit(
                     selected_profile.min_decode_tokens,
                     selected_profile.max_decode_tokens,

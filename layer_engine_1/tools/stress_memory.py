@@ -71,6 +71,7 @@ def main() -> int:
     parser.add_argument("--duration-s", type=float, default=2.0)
     parser.add_argument("--drain-s", type=float, default=1.0)
     parser.add_argument("--sample-ms", type=float, default=50.0)
+    parser.add_argument("--gpu-preset", action="store_true")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--dtype", default="float32")
     parser.add_argument("--vocab-size", type=int, default=256)
@@ -88,6 +89,20 @@ def main() -> int:
     parser.add_argument("--queue-explosion", type=int, default=200)
     parser.add_argument("--itl-inflation", type=float, default=4.0)
     args = parser.parse_args()
+
+    if args.gpu_preset:
+        args.device = "cuda"
+        args.dtype = "float16"
+        args.max_batch_size = 128
+        args.max_seq_len = 2048
+        args.num_layers = 8
+        args.num_heads = 8
+        args.head_dim = 64
+        args.base_rate = 300.0
+        args.burst_rate = 800.0
+        args.burst_prob = 0.7
+        args.min_decode_tokens = 256
+        args.long_prompt_len = 1536
 
     _ensure_out_dir(args.out_dir)
 
