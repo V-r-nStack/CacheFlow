@@ -17,7 +17,7 @@ import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from runtime.engine import run_engine
+from runtime.engine import SimulatedComputePacer, run_engine
 from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence
@@ -88,6 +88,10 @@ def main() -> int:
     parser.add_argument("--collapse-tps", type=float, default=100.0)
     parser.add_argument("--queue-explosion", type=int, default=200)
     parser.add_argument("--itl-inflation", type=float, default=4.0)
+    parser.add_argument("--pacer-base-delay-s", type=float, default=0.001)
+    parser.add_argument("--pacer-per-sequence-delay-s", type=float, default=0.00005)
+    parser.add_argument("--pacer-per-token-delay-s", type=float, default=0.0000002)
+    parser.add_argument("--pacer-max-delay-s", type=float, default=0.02)
     args = parser.parse_args()
 
     if args.gpu_preset:
@@ -103,6 +107,10 @@ def main() -> int:
         args.burst_prob = 0.7
         args.min_decode_tokens = 256
         args.long_prompt_len = 1536
+        args.pacer_base_delay_s = 0.002
+        args.pacer_per_sequence_delay_s = 0.0001
+        args.pacer_per_token_delay_s = 0.0000005
+        args.pacer_max_delay_s = 0.03
 
     _ensure_out_dir(args.out_dir)
 
@@ -124,6 +132,13 @@ def main() -> int:
     runtime_tracer = RuntimeTracer()
     stop_event = threading.Event()
 
+    compute_pacer = SimulatedComputePacer(
+        base_delay_s=args.pacer_base_delay_s,
+        per_sequence_delay_s=args.pacer_per_sequence_delay_s,
+        per_token_delay_s=args.pacer_per_token_delay_s,
+        max_delay_s=args.pacer_max_delay_s,
+    )
+
     thread = start_engine_background(
         model,
         scheduler,
@@ -134,6 +149,7 @@ def main() -> int:
         top_k=10,
         min_decode_tokens=args.min_decode_tokens,
         runtime_tracer=runtime_tracer,
+        compute_pacer=compute_pacer,
     )
 
     async def _run_workload() -> None:

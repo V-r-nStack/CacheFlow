@@ -6,6 +6,7 @@ import csv
 import os
 import time
 import threading
+from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
@@ -15,6 +16,24 @@ from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
 from runtime.tracer import RuntimeTracer
+
+
+@dataclass
+class SimulatedComputePacer:
+    base_delay_s: float = 0.0
+    per_sequence_delay_s: float = 0.0
+    per_token_delay_s: float = 0.0
+    max_delay_s: float = 0.1
+
+    def compute_delay_s(self, active_batch_size: int, total_context_tokens: int) -> float:
+        delay = (
+            self.base_delay_s
+            + self.per_sequence_delay_s * float(active_batch_size)
+            + self.per_token_delay_s * float(total_context_tokens)
+        )
+        if self.max_delay_s is not None:
+            delay = min(delay, self.max_delay_s)
+        return max(delay, 0.0)
 
 
 def _sample_next_token(
@@ -73,6 +92,7 @@ def run_engine(
     min_decode_tokens: int = 50,
     preempt_waiting_threshold: Optional[int] = None,
     preempt_long_context_tokens: Optional[int] = None,
+    compute_pacer: Optional[SimulatedComputePacer] = None,
     metrics_path: Optional[str] = None,
     runtime_tracer: Optional[RuntimeTracer] = None,
     tracer_dump_path: Optional[str] = None,
@@ -285,6 +305,17 @@ def run_engine(
                     batch_utilization_ratio=batch_utilization_ratio,
                     idle_decode_slots=idle_decode_slots,
                 )
+
+            if compute_pacer is not None:
+                total_context_tokens = sum(
+                    sequence.logical_length for sequence in scheduler.active_batch
+                )
+                delay_s = compute_pacer.compute_delay_s(
+                    active_batch_size=active_batch_size,
+                    total_context_tokens=total_context_tokens,
+                )
+                if delay_s > 0:
+                    time.sleep(delay_s)
     finally:
         if metrics_file is not None:
             metrics_file.close()

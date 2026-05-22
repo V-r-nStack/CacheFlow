@@ -19,7 +19,7 @@ import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from runtime.engine import run_engine
+from runtime.engine import SimulatedComputePacer, run_engine
 from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence
@@ -94,6 +94,13 @@ def _run_one(
     runtime_tracer = RuntimeTracer()
     stop_event = threading.Event()
 
+    compute_pacer = SimulatedComputePacer(
+        base_delay_s=args.pacer_base_delay_s,
+        per_sequence_delay_s=args.pacer_per_sequence_delay_s,
+        per_token_delay_s=args.pacer_per_token_delay_s,
+        max_delay_s=args.pacer_max_delay_s,
+    )
+
     thread = start_engine_background(
         model,
         scheduler,
@@ -107,6 +114,7 @@ def _run_one(
         preempt_waiting_threshold=config.preempt_waiting_threshold,
         preempt_long_context_tokens=config.preempt_long_context_tokens,
         runtime_tracer=runtime_tracer,
+        compute_pacer=compute_pacer,
     )
 
     async def _run_workload() -> None:
@@ -248,6 +256,10 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--preempt-waiting-threshold", type=int, default=8)
     parser.add_argument("--preempt-long-context-tokens", type=int, default=128)
+    parser.add_argument("--pacer-base-delay-s", type=float, default=0.001)
+    parser.add_argument("--pacer-per-sequence-delay-s", type=float, default=0.00005)
+    parser.add_argument("--pacer-per-token-delay-s", type=float, default=0.0000002)
+    parser.add_argument("--pacer-max-delay-s", type=float, default=0.02)
     args = parser.parse_args()
 
     _ensure_out_dir(args.out_dir)
