@@ -38,6 +38,13 @@ class Sequence:
     prompt_token_ids: List[int] = field(default_factory=list)
     generated_token_ids: List[int] = field(default_factory=list)
     arrival_time: float = field(default_factory=time)
+    queued_at: Optional[float] = None
+    admitted_at: Optional[float] = None
+    preempted_at: Optional[float] = None
+    prefill_start_at: Optional[float] = None
+    prefill_end_at: Optional[float] = None
+    first_decode_start_at: Optional[float] = None
+    first_decode_end_at: Optional[float] = None
     finish_time: Optional[float] = None
     ttft_s: Optional[float] = None
     total_latency_s: Optional[float] = None
@@ -48,6 +55,8 @@ class Sequence:
     preemption_count: int = 0
     _wait_start_time: Optional[float] = None
     _preempt_start_time: Optional[float] = None
+    _steady_state_itl_sum: float = 0.0
+    _steady_state_itl_count: int = 0
 
     @property
     def logical_length(self) -> int:

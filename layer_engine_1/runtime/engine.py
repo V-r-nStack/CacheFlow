@@ -161,6 +161,11 @@ def run_engine(
                         [sequence.generated_token_ids[-1]], dtype=torch.long, device=device
                     ).unsqueeze(0)
 
+                if generated_len == 0 and sequence.prefill_start_at is None:
+                    sequence.prefill_start_at = time.time()
+                elif generated_len == 1 and sequence.first_decode_start_at is None:
+                    sequence.first_decode_start_at = time.time()
+
                 start_time = time.perf_counter()
                 with torch.inference_mode():
                     _ = prepare_continuous_batch([sequence], memory_manager, device=device)
@@ -171,6 +176,14 @@ def run_engine(
                         sequence_id=sequence.seq_id,
                     )
                 elapsed = time.perf_counter() - start_time
+
+                if generated_len == 0 and sequence.prefill_end_at is None:
+                    sequence.prefill_end_at = time.time()
+                elif generated_len == 1 and sequence.first_decode_end_at is None:
+                    sequence.first_decode_end_at = time.time()
+                elif generated_len >= 2:
+                    sequence._steady_state_itl_sum += float(elapsed)
+                    sequence._steady_state_itl_count += 1
 
                 if generated_len == 0 and sequence.ttft_s is None:
                     sequence.ttft_s = elapsed
@@ -241,6 +254,7 @@ def run_engine(
                 free_slots = memory_manager.free_slots_count()
                 allocated_slots = static_kv_cache.total_slots - free_slots
                 fairness = scheduler.aggregate_fairness_metrics()
+                latency_breakdown = scheduler.aggregate_latency_metrics()
                 runtime_tracer.record_tick(
                     timestamp=time.time(),
                     queue_depth=queue_depth,
@@ -252,6 +266,11 @@ def run_engine(
                     p95_wait_s=fairness["p95_wait_s"],
                     max_starvation_s=fairness["max_starvation_s"],
                     short_long_ratio=fairness["short_long_ratio"],
+                    queue_wait_latency=latency_breakdown["queue_wait_latency"],
+                    admission_latency=latency_breakdown["admission_latency"],
+                    compute_prefill_latency=latency_breakdown["compute_prefill_latency"],
+                    first_decode_latency=latency_breakdown["first_decode_latency"],
+                    steady_state_itl=latency_breakdown["steady_state_itl"],
                 )
     finally:
         if metrics_file is not None:

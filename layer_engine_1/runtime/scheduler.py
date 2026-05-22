@@ -43,6 +43,8 @@ class Scheduler:
             raise TypeError("sequence must be a Sequence instance")
 
         now = time.time()
+        if sequence.queued_at is None:
+            sequence.queued_at = now
         self._mark_wait_start(sequence, now)
         with self._waiting_lock:
             self.waiting_queue.append(sequence)
@@ -169,6 +171,58 @@ class Scheduler:
             "short_long_ratio": float(short_long_ratio),
         }
 
+    def aggregate_latency_metrics(self) -> Dict[str, float]:
+        now = time.time()
+        queue_wait_samples: List[float] = []
+        admission_samples: List[float] = []
+        prefill_samples: List[float] = []
+        first_decode_samples: List[float] = []
+        steady_state_samples: List[float] = []
+
+        for sequence in self._gather_sequences():
+            if sequence.queued_at is not None:
+                if sequence.admitted_at is not None:
+                    queue_wait_samples.append(
+                        max(0.0, sequence.admitted_at - sequence.queued_at)
+                    )
+                else:
+                    queue_wait_samples.append(max(0.0, now - sequence.queued_at))
+
+            if sequence.admitted_at is not None and sequence.prefill_start_at is not None:
+                admission_samples.append(
+                    max(0.0, sequence.prefill_start_at - sequence.admitted_at)
+                )
+
+            if sequence.prefill_start_at is not None and sequence.prefill_end_at is not None:
+                prefill_samples.append(
+                    max(0.0, sequence.prefill_end_at - sequence.prefill_start_at)
+                )
+
+            if (
+                sequence.first_decode_start_at is not None
+                and sequence.first_decode_end_at is not None
+            ):
+                first_decode_samples.append(
+                    max(0.0, sequence.first_decode_end_at - sequence.first_decode_start_at)
+                )
+
+            if sequence._steady_state_itl_count > 0:
+                steady_state_samples.append(
+                    sequence._steady_state_itl_sum / sequence._steady_state_itl_count
+                )
+
+        return {
+            "queue_wait_latency": self._mean(queue_wait_samples),
+            "admission_latency": self._mean(admission_samples),
+            "compute_prefill_latency": self._mean(prefill_samples),
+            "first_decode_latency": self._mean(first_decode_samples),
+            "steady_state_itl": self._mean(steady_state_samples),
+        }
+
+    @staticmethod
+    def _mean(samples: List[float]) -> float:
+        return float(sum(samples) / len(samples)) if samples else 0.0
+
     @staticmethod
     def _resolve_total_latency(sequence: Sequence) -> Optional[float]:
         if sequence.total_latency_s is not None:
@@ -274,6 +328,8 @@ class Scheduler:
         now = time.time()
         for sequence in promoted_sequences:
             self._mark_wait_end(sequence, now)
+            if sequence.admitted_at is None:
+                sequence.admitted_at = now
 
         promoted_ids = {id(sequence) for sequence in promoted_sequences}
 
@@ -331,6 +387,7 @@ class Scheduler:
         preempt_candidate.preemption_count += 1
         preempt_candidate.release_blocks(memory_manager)
         now = time.time()
+        preempt_candidate.preempted_at = now
         preempt_candidate._preempt_start_time = now
         self._mark_wait_start(preempt_candidate, now)
         with self._waiting_lock:
@@ -352,6 +409,8 @@ class Scheduler:
                     sequence for sequence in self.waiting_queue if sequence is not admitted
                 ]
             self._mark_wait_end(admitted, now)
+            if admitted.admitted_at is None:
+                admitted.admitted_at = now
             self.active_batch.append(admitted)
 
         return preempt_candidate
