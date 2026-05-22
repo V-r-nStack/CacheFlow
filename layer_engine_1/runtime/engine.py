@@ -70,6 +70,9 @@ def run_engine(
     top_k: int = 0,
     repetition_penalty: float = 1.0,
     policy: str = "fcfs",
+    min_decode_tokens: int = 50,
+    preempt_waiting_threshold: Optional[int] = None,
+    preempt_long_context_tokens: Optional[int] = None,
     metrics_path: Optional[str] = None,
     runtime_tracer: Optional[RuntimeTracer] = None,
     tracer_dump_path: Optional[str] = None,
@@ -107,7 +110,13 @@ def run_engine(
             if stop_event is not None and stop_event.is_set():
                 break
             scheduler.step_eviction(memory_manager)
-            scheduler.schedule_next_iteration(policy=policy, memory_manager=memory_manager)
+            scheduler.schedule_next_iteration(
+                policy=policy,
+                memory_manager=memory_manager,
+                min_decode_tokens=min_decode_tokens,
+                preempt_waiting_threshold=preempt_waiting_threshold,
+                preempt_long_context_tokens=preempt_long_context_tokens,
+            )
 
             if not scheduler.active_batch:
                 if metrics_writer is not None:
