@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -13,6 +14,20 @@ class RuntimeTracer:
     """Collect per-tick metrics into an in-memory DataFrame."""
 
     _rows: List[Dict[str, float]] = field(default_factory=list)
+    _batch_util_samples: List[float] = field(default_factory=list)
+
+    def _update_batch_util_stats(self, batch_utilization_ratio: Optional[float]) -> Dict[str, float]:
+        if batch_utilization_ratio is not None:
+            self._batch_util_samples.append(float(batch_utilization_ratio))
+
+        if not self._batch_util_samples:
+            return {"avg": 0.0, "p95": 0.0}
+
+        ordered = sorted(self._batch_util_samples)
+        avg = sum(ordered) / len(ordered)
+        idx = max(0, int(math.ceil(0.95 * len(ordered))) - 1)
+        p95 = ordered[idx]
+        return {"avg": float(avg), "p95": float(p95)}
 
     def record_tick(
         self,
@@ -31,7 +46,10 @@ class RuntimeTracer:
         compute_prefill_latency: Optional[float] = None,
         first_decode_latency: Optional[float] = None,
         steady_state_itl: Optional[float] = None,
+        batch_utilization_ratio: Optional[float] = None,
+        idle_decode_slots: Optional[int] = None,
     ) -> None:
+        utilization_stats = self._update_batch_util_stats(batch_utilization_ratio)
         self._rows.append(
             {
                 "timestamp": float(timestamp),
@@ -59,6 +77,12 @@ class RuntimeTracer:
                 "steady_state_itl": None
                 if steady_state_itl is None
                 else float(steady_state_itl),
+                "batch_utilization_ratio": None
+                if batch_utilization_ratio is None
+                else float(batch_utilization_ratio),
+                "idle_decode_slots": None if idle_decode_slots is None else int(idle_decode_slots),
+                "avg_batch_utilization": utilization_stats["avg"],
+                "p95_batch_utilization": utilization_stats["p95"],
             }
         )
 

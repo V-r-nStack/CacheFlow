@@ -235,6 +235,8 @@ def run_engine(
                 if scheduler.max_batch_size > 0
                 else 0.0
             )
+            batch_utilization_ratio = active_utilization
+            idle_decode_slots = max(scheduler.max_batch_size - active_batch_size, 0)
 
             if metrics_writer is not None:
                 metrics_writer.writerow(
@@ -271,6 +273,8 @@ def run_engine(
                     compute_prefill_latency=latency_breakdown["compute_prefill_latency"],
                     first_decode_latency=latency_breakdown["first_decode_latency"],
                     steady_state_itl=latency_breakdown["steady_state_itl"],
+                    batch_utilization_ratio=batch_utilization_ratio,
+                    idle_decode_slots=idle_decode_slots,
                 )
     finally:
         if metrics_file is not None:
