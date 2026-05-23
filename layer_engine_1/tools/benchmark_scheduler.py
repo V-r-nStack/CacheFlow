@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -72,7 +73,8 @@ def _drain_scheduler(scheduler: Scheduler, timeout_s: float) -> None:
 def _run_one(
     config: SchedulerConfig,
     args: argparse.Namespace,
-) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    profile: str,
+) -> Tuple[pd.DataFrame, Dict[str, float], List[float]]:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
@@ -125,7 +127,7 @@ def _run_one(
             burst_rate=args.burst_rate,
             burst_prob=args.burst_prob,
             vocab_size=args.vocab_size,
-            profile=args.profile,
+            profile=profile,
             stop_event=stop_event,
         )
 
@@ -140,7 +142,7 @@ def _run_one(
     elapsed_s = max(1e-6, end_time - start_time)
 
     df = runtime_tracer.to_dataframe()
-    trace_path = os.path.join(args.out_dir, f"trace_{config.name}.csv")
+    trace_path = os.path.join(args.out_dir, f"trace_{profile}_{config.name}.csv")
     runtime_tracer.dump_csv(trace_path)
 
     completed = list(scheduler.completed_sequences)
@@ -150,6 +152,7 @@ def _run_one(
     starvation_times = [seq.starvation_duration for seq in completed if seq.starvation_duration is not None]
 
     summary = {
+        "profile": profile,
         "policy": config.name,
         "throughput_toks_per_s": total_tokens / elapsed_s,
         "p95_itl_s": float(df["itl_s"].quantile(0.95)) if not df.empty else 0.0,
@@ -162,7 +165,7 @@ def _run_one(
         "trace_path": trace_path,
     }
 
-    return df, summary
+    return df, summary, starvation_times
 
 
 def _plot_summary(summary_df: pd.DataFrame, out_dir: str) -> str:
@@ -212,7 +215,7 @@ def _plot_summary(summary_df: pd.DataFrame, out_dir: str) -> str:
     return out_path
 
 
-def _plot_utilization(traces: Dict[str, pd.DataFrame], out_dir: str) -> str:
+def _plot_utilization(traces: Dict[str, pd.DataFrame], out_dir: str, profile: str) -> str:
     fig, ax = plt.subplots(figsize=(10, 5))
     for name, df in traces.items():
         if df.empty:
@@ -226,7 +229,84 @@ def _plot_utilization(traces: Dict[str, pd.DataFrame], out_dir: str) -> str:
     ax.grid(True, alpha=0.3)
     ax.legend()
 
-    out_path = os.path.join(out_dir, "batch_utilization.png")
+    out_path = os.path.join(out_dir, f"batch_utilization_{profile}.png")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def _align_time_series(
+    traces: Dict[str, pd.DataFrame],
+    column: str,
+    samples: int = 300,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    series: Dict[str, pd.Series] = {}
+    min_end = None
+    for name, df in traces.items():
+        if df.empty or column not in df.columns:
+            continue
+        time_rel = df["timestamp"] - df["timestamp"].iloc[0]
+        series[name] = pd.Series(df[column].values, index=time_rel.values)
+        end = float(time_rel.iloc[-1]) if not time_rel.empty else 0.0
+        min_end = end if min_end is None else min(min_end, end)
+
+    if min_end is None or min_end <= 0.0:
+        return np.array([]), {}
+
+    grid = np.linspace(0.0, min_end, samples)
+    aligned: Dict[str, np.ndarray] = {}
+    for name, s in series.items():
+        aligned[name] = np.interp(grid, s.index.values, s.values)
+    return grid, aligned
+
+
+def _plot_queue_divergence(traces: Dict[str, pd.DataFrame], out_dir: str, profile: str) -> str:
+    grid, aligned = _align_time_series(traces, "queue_depth")
+    if grid.size == 0 or "fcfs" not in aligned:
+        return ""
+
+    baseline = aligned["fcfs"]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for name, series in aligned.items():
+        if name == "fcfs":
+            continue
+        ax.plot(grid, series - baseline, label=f"{name} - fcfs")
+
+    ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.6)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Queue Depth Delta")
+    ax.set_title(f"Queue Depth Divergence ({profile})")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    out_path = os.path.join(out_dir, f"queue_divergence_{profile}.png")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def _plot_starvation_cdf(
+    starvation_samples: Dict[str, List[float]],
+    out_dir: str,
+    profile: str,
+) -> str:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for name, samples in starvation_samples.items():
+        if not samples:
+            continue
+        data = np.sort(np.asarray(samples, dtype=float))
+        y = np.arange(1, len(data) + 1) / float(len(data))
+        ax.plot(data, y, label=name)
+
+    ax.set_xlabel("Starvation Duration (s)")
+    ax.set_ylabel("CDF")
+    ax.set_title(f"Starvation CDF ({profile})")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    out_path = os.path.join(out_dir, f"starvation_cdf_{profile}.png")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -236,11 +316,15 @@ def _plot_utilization(traces: Dict[str, pd.DataFrame], out_dir: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark scheduler policies.")
     parser.add_argument("--out-dir", default="/tmp/scheduler_bench")
-    parser.add_argument("--duration-s", type=float, default=1.5)
+    parser.add_argument("--duration-s", type=float, default=300.0)
     parser.add_argument("--drain-s", type=float, default=1.0)
     parser.add_argument("--stop-timeout-s", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=1337)
-    parser.add_argument("--profile", default="mixed_contention")
+    parser.add_argument(
+        "--profiles",
+        default="sustained_overload,starvation_pressure",
+        help="Comma-separated workload profiles to run.",
+    )
     parser.add_argument("--base-rate", type=float, default=20.0)
     parser.add_argument("--burst-rate", type=float, default=80.0)
     parser.add_argument("--burst-prob", type=float, default=0.5)
@@ -262,6 +346,12 @@ def main() -> int:
     parser.add_argument("--pacer-max-delay-s", type=float, default=0.02)
     args = parser.parse_args()
 
+    if args.duration_s < 300.0:
+        print("[INFO] duration_s raised to 300s for sustained pressure harness")
+        args.duration_s = 300.0
+
+    profiles = [p.strip() for p in args.profiles.split(",") if p.strip()]
+
     _ensure_out_dir(args.out_dir)
 
     configs = [
@@ -275,24 +365,33 @@ def main() -> int:
         ),
     ]
 
-    traces: Dict[str, pd.DataFrame] = {}
     summaries: List[Dict[str, float]] = []
+    plot_paths: List[str] = []
 
-    for config in configs:
-        df, summary = _run_one(config, args)
-        traces[config.name] = df
-        summaries.append(summary)
+    for profile in profiles:
+        traces: Dict[str, pd.DataFrame] = {}
+        starvation_samples: Dict[str, List[float]] = {}
+
+        for config in configs:
+            df, summary, starvation_times = _run_one(config, args, profile)
+            traces[config.name] = df
+            starvation_samples[config.name] = starvation_times
+            summaries.append(summary)
+
+        plot_paths.append(_plot_queue_divergence(traces, args.out_dir, profile))
+        plot_paths.append(_plot_starvation_cdf(starvation_samples, args.out_dir, profile))
+        plot_paths.append(_plot_utilization(traces, args.out_dir, profile))
 
     summary_df = pd.DataFrame(summaries)
     summary_path = os.path.join(args.out_dir, "scheduler_summary.csv")
     summary_df.to_csv(summary_path, index=False)
 
-    summary_plot = _plot_summary(summary_df, args.out_dir)
-    util_plot = _plot_utilization(traces, args.out_dir)
-
     print(summary_path)
-    print(summary_plot)
-    print(util_plot)
+    if not summary_df.empty:
+        print(_plot_summary(summary_df, args.out_dir))
+    for path in plot_paths:
+        if path:
+            print(path)
 
     return 0
 
