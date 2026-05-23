@@ -9,6 +9,114 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 
+class ResidencyAnalyzer:
+    """Track residency lifetimes and overlap dynamics under sustained load."""
+
+    def __init__(self) -> None:
+        self._baseline_ids: Optional[set] = None
+        self._baseline_start: Optional[float] = None
+        self._last_half_life_s: Optional[float] = None
+        self._decode_overlap_s: float = 0.0
+        self._last_timestamp: Optional[float] = None
+        self._completed_count: int = 0
+        self._sum_residency_lifetime_s: float = 0.0
+        self._sum_residency_amplification: float = 0.0
+        self._last_residency_lifetime_s: Optional[float] = None
+        self._last_residency_amplification: Optional[float] = None
+
+    def observe_tick(
+        self,
+        timestamp: float,
+        active_sequence_ids: Optional[List[int]],
+        active_batch_size: int,
+    ) -> Dict[str, Optional[float]]:
+        if self._last_timestamp is None:
+            self._last_timestamp = float(timestamp)
+
+        dt_s = max(0.0, float(timestamp) - float(self._last_timestamp))
+        if dt_s > 0.0 and int(active_batch_size) > 1:
+            self._decode_overlap_s += dt_s
+
+        half_life = self._last_half_life_s
+        if active_sequence_ids is not None:
+            active_set = set(active_sequence_ids)
+            if not active_set:
+                if self._baseline_ids and self._baseline_start is not None:
+                    self._last_half_life_s = float(timestamp) - float(self._baseline_start)
+                    half_life = self._last_half_life_s
+                self._baseline_ids = None
+                self._baseline_start = None
+            else:
+                if not self._baseline_ids:
+                    self._baseline_ids = set(active_set)
+                    self._baseline_start = float(timestamp)
+                else:
+                    baseline_size = len(self._baseline_ids)
+                    remaining = len(self._baseline_ids.intersection(active_set))
+                    if baseline_size > 0 and remaining <= baseline_size / 2.0:
+                        if self._baseline_start is not None:
+                            self._last_half_life_s = float(timestamp) - float(self._baseline_start)
+                            half_life = self._last_half_life_s
+                        self._baseline_ids = set(active_set)
+                        self._baseline_start = float(timestamp)
+
+        self._last_timestamp = float(timestamp)
+        return {
+            "active_sequence_residency_half_life": half_life,
+            "decode_overlap_duration": self._decode_overlap_s,
+        }
+
+    def record_completion(self, sequence, fallback_finish_time: float) -> Dict[str, Optional[float]]:
+        finish_time = sequence.finish_time or fallback_finish_time
+        start_time = (
+            sequence.first_decode_start_at
+            or sequence.prefill_start_at
+            or sequence.arrival_time
+        )
+        lifetime = max(0.0, float(finish_time) - float(start_time))
+
+        compute_time = 0.0
+        if sequence.prefill_start_at is not None and sequence.prefill_end_at is not None:
+            compute_time += max(0.0, sequence.prefill_end_at - sequence.prefill_start_at)
+        if sequence.first_decode_start_at is not None and sequence.first_decode_end_at is not None:
+            compute_time += max(0.0, sequence.first_decode_end_at - sequence.first_decode_start_at)
+        if sequence._steady_state_itl_sum > 0.0:
+            compute_time += float(sequence._steady_state_itl_sum)
+        if compute_time <= 0.0 and sequence.ttft_s is not None:
+            compute_time = float(sequence.ttft_s)
+
+        amplification = lifetime / compute_time if compute_time > 0.0 else 0.0
+
+        self._completed_count += 1
+        self._sum_residency_lifetime_s += lifetime
+        self._sum_residency_amplification += amplification
+        self._last_residency_lifetime_s = lifetime
+        self._last_residency_amplification = amplification
+
+        return {
+            "sequence_residency_lifetime": lifetime,
+            "residency_amplification": amplification,
+        }
+
+    def summary(self) -> Dict[str, Optional[float]]:
+        avg_lifetime = (
+            self._sum_residency_lifetime_s / self._completed_count
+            if self._completed_count > 0
+            else 0.0
+        )
+        avg_amplification = (
+            self._sum_residency_amplification / self._completed_count
+            if self._completed_count > 0
+            else 0.0
+        )
+        return {
+            "avg_sequence_residency_lifetime": avg_lifetime,
+            "avg_residency_amplification": avg_amplification,
+            "last_sequence_residency_lifetime": self._last_residency_lifetime_s,
+            "last_residency_amplification": self._last_residency_amplification,
+        }
+
+
 @dataclass
 class RuntimeTracer:
     """Collect per-tick metrics into an in-memory DataFrame."""
@@ -23,9 +131,8 @@ class RuntimeTracer:
     _max_batch_occupancy_start: Optional[float] = None
     _max_batch_occupancy_max_s: float = 0.0
     _last_allocated_kv_slots: Optional[int] = None
-    _residency_baseline_ids: Optional[set] = None
-    _residency_baseline_start: Optional[float] = None
-    _last_residency_half_life_s: Optional[float] = None
+    _last_queue_depth: Optional[int] = None
+    _residency_analyzer: ResidencyAnalyzer = field(default_factory=ResidencyAnalyzer)
 
     def _update_batch_util_stats(self, batch_utilization_ratio: Optional[float]) -> Dict[str, float]:
         if batch_utilization_ratio is not None:
@@ -39,6 +146,16 @@ class RuntimeTracer:
         idx = max(0, int(math.ceil(0.95 * len(ordered))) - 1)
         p95 = ordered[idx]
         return {"avg": float(avg), "p95": float(p95)}
+
+    def record_sequence_completions(
+        self,
+        sequences: List,
+        timestamp: Optional[float] = None,
+    ) -> None:
+        if timestamp is None:
+            timestamp = 0.0
+        for sequence in sequences:
+            self._residency_analyzer.record_completion(sequence, float(timestamp))
 
     def record_tick(
         self,
@@ -100,41 +217,27 @@ class RuntimeTracer:
                 max_batch_occupancy_duration = self._max_batch_occupancy_max_s
 
         kv_allocation_churn_rate = 0.0
+        kv_allocated_per_step = 0.0
+        kv_freed_per_step = 0.0
         if self._last_allocated_kv_slots is not None and dt_s > 0.0:
-            kv_allocation_churn_rate = abs(
-                int(allocated_kv_slots) - int(self._last_allocated_kv_slots)
-            ) / dt_s
+            delta_slots = int(allocated_kv_slots) - int(self._last_allocated_kv_slots)
+            kv_allocation_churn_rate = abs(delta_slots) / dt_s
+            if delta_slots > 0:
+                kv_allocated_per_step = float(delta_slots)
+            elif delta_slots < 0:
+                kv_freed_per_step = float(-delta_slots)
         self._last_allocated_kv_slots = int(allocated_kv_slots)
 
-        residency_half_life = self._last_residency_half_life_s
-        if active_sequence_ids is not None:
-            active_set = set(active_sequence_ids)
-            if not active_set:
-                if self._residency_baseline_ids:
-                    baseline_size = len(self._residency_baseline_ids)
-                    if baseline_size > 0 and self._residency_baseline_start is not None:
-                        self._last_residency_half_life_s = float(timestamp) - float(
-                            self._residency_baseline_start
-                        )
-                        residency_half_life = self._last_residency_half_life_s
-                self._residency_baseline_ids = None
-                self._residency_baseline_start = None
-            else:
-                if not self._residency_baseline_ids:
-                    self._residency_baseline_ids = set(active_set)
-                    self._residency_baseline_start = float(timestamp)
-                else:
-                    baseline_size = len(self._residency_baseline_ids)
-                    remaining = len(self._residency_baseline_ids.intersection(active_set))
-                    if baseline_size > 0 and remaining <= baseline_size / 2.0:
-                        if self._residency_baseline_start is not None:
-                            self._last_residency_half_life_s = float(timestamp) - float(
-                                self._residency_baseline_start
-                            )
-                            residency_half_life = self._last_residency_half_life_s
-                        self._residency_baseline_ids = set(active_set)
-                        self._residency_baseline_start = float(timestamp)
-
+        queue_growth_rate = 0.0
+        if self._last_queue_depth is not None and dt_s > 0.0:
+            queue_growth_rate = (int(queue_depth) - int(self._last_queue_depth)) / dt_s
+        self._last_queue_depth = int(queue_depth)
+        residency_metrics = self._residency_analyzer.observe_tick(
+            timestamp=float(timestamp),
+            active_sequence_ids=active_sequence_ids,
+            active_batch_size=int(active_batch_size),
+        )
+        residency_summary = self._residency_analyzer.summary()
         self._last_timestamp = float(timestamp)
         utilization_stats = self._update_batch_util_stats(batch_utilization_ratio)
         self._rows.append(
@@ -170,9 +273,25 @@ class RuntimeTracer:
                 "idle_decode_slots": None if idle_decode_slots is None else int(idle_decode_slots),
                 "queue_persistence_ratio": float(queue_persistence_ratio),
                 "max_batch_occupancy_duration": float(max_batch_occupancy_duration),
-                "residency_half_life": None
-                if residency_half_life is None
-                else float(residency_half_life),
+                "active_sequence_residency_half_life": None
+                if residency_metrics["active_sequence_residency_half_life"] is None
+                else float(residency_metrics["active_sequence_residency_half_life"]),
+                "decode_overlap_duration": float(residency_metrics["decode_overlap_duration"]),
+                "sequence_residency_lifetime": None
+                if residency_summary["last_sequence_residency_lifetime"] is None
+                else float(residency_summary["last_sequence_residency_lifetime"]),
+                "residency_amplification": None
+                if residency_summary["last_residency_amplification"] is None
+                else float(residency_summary["last_residency_amplification"]),
+                "avg_sequence_residency_lifetime": float(
+                    residency_summary["avg_sequence_residency_lifetime"]
+                ),
+                "avg_residency_amplification": float(
+                    residency_summary["avg_residency_amplification"]
+                ),
+                "kv_allocated_per_step": float(kv_allocated_per_step),
+                "kv_freed_per_step": float(kv_freed_per_step),
+                "queue_growth_rate": float(queue_growth_rate),
                 "kv_allocation_churn_rate": float(kv_allocation_churn_rate),
                 "avg_batch_utilization": utilization_stats["avg"],
                 "p95_batch_utilization": utilization_stats["p95"],
@@ -187,4 +306,4 @@ class RuntimeTracer:
         df.to_csv(file_path, index=False)
 
 
-__all__ = ["RuntimeTracer"]
+__all__ = ["RuntimeTracer", "ResidencyAnalyzer"]

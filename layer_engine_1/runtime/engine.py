@@ -129,7 +129,9 @@ def run_engine(
         while scheduler.waiting_queue or scheduler.active_batch:
             if stop_event is not None and stop_event.is_set():
                 break
-            scheduler.step_eviction(memory_manager)
+            evicted = scheduler.step_eviction(memory_manager)
+            if runtime_tracer is not None and evicted:
+                runtime_tracer.record_sequence_completions(evicted, timestamp=time.time())
             scheduler.schedule_next_iteration(
                 policy=policy,
                 memory_manager=memory_manager,
