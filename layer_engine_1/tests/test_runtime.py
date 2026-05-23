@@ -350,6 +350,10 @@ def test_workload_profiles() -> None:
     assert "bursty_chat" in WORKLOAD_PROFILES
     assert "heavy_document_qa" in WORKLOAD_PROFILES
     assert "mixed_contention" in WORKLOAD_PROFILES
+    assert "persistent_long_context" in WORKLOAD_PROFILES
+    assert "starvation_pressure" in WORKLOAD_PROFILES
+    assert "sustained_overload" in WORKLOAD_PROFILES
+    assert "mixed_decode_tail_latency" in WORKLOAD_PROFILES
 
 
 def run_all() -> None:

@@ -25,6 +25,11 @@ class WorkloadProfile:
     prompt_weights: List[float]
     min_decode_tokens: int
     max_decode_tokens: int
+    use_long_tail_decode: Optional[bool] = None
+    long_tail_distribution: Optional[str] = None
+    light_decode_range: Optional[SeqType[int]] = None
+    heavy_decode_range: Optional[SeqType[int]] = None
+    heavy_decode_prob: Optional[float] = None
 
 
 WORKLOAD_PROFILES = {
@@ -57,6 +62,54 @@ WORKLOAD_PROFILES = {
         prompt_weights=[0.125, 0.125, 0.125, 0.125, 0.166, 0.167, 0.167],
         min_decode_tokens=10,
         max_decode_tokens=100,
+    ),
+    "persistent_long_context": WorkloadProfile(
+        name="persistent_long_context",
+        base_rate=180.0,
+        burst_rate=180.0,
+        burst_prob=1.0,
+        prompt_lengths=[2048, 2560, 3072, 3584, 4096],
+        prompt_weights=[0.25, 0.2, 0.2, 0.2, 0.15],
+        min_decode_tokens=128,
+        max_decode_tokens=256,
+        use_long_tail_decode=False,
+    ),
+    "starvation_pressure": WorkloadProfile(
+        name="starvation_pressure",
+        base_rate=500.0,
+        burst_rate=500.0,
+        burst_prob=1.0,
+        prompt_lengths=[10, 2048, 3072, 4096],
+        prompt_weights=[0.9, 0.04, 0.03, 0.03],
+        min_decode_tokens=128,
+        max_decode_tokens=512,
+        use_long_tail_decode=False,
+    ),
+    "sustained_overload": WorkloadProfile(
+        name="sustained_overload",
+        base_rate=1500.0,
+        burst_rate=2200.0,
+        burst_prob=1.0,
+        prompt_lengths=[256, 512, 1024, 1536],
+        prompt_weights=[0.35, 0.3, 0.2, 0.15],
+        min_decode_tokens=256,
+        max_decode_tokens=768,
+        use_long_tail_decode=False,
+    ),
+    "mixed_decode_tail_latency": WorkloadProfile(
+        name="mixed_decode_tail_latency",
+        base_rate=220.0,
+        burst_rate=420.0,
+        burst_prob=0.7,
+        prompt_lengths=[64, 128, 256, 512, 1024, 1536],
+        prompt_weights=[0.2, 0.2, 0.2, 0.15, 0.15, 0.1],
+        min_decode_tokens=64,
+        max_decode_tokens=128,
+        use_long_tail_decode=True,
+        long_tail_distribution="pareto",
+        light_decode_range=(32, 160),
+        heavy_decode_range=(512, 4096),
+        heavy_decode_prob=0.35,
     ),
 }
 
@@ -172,6 +225,16 @@ async def run_synthetic_workload(
         burst_prob = selected_profile.burst_prob
         prompt_lengths = selected_profile.prompt_lengths
         prompt_weights = selected_profile.prompt_weights
+        if selected_profile.use_long_tail_decode is not None:
+            use_long_tail_decode = selected_profile.use_long_tail_decode
+        if selected_profile.long_tail_distribution is not None:
+            long_tail_distribution = selected_profile.long_tail_distribution
+        if selected_profile.light_decode_range is not None:
+            light_decode_range = selected_profile.light_decode_range
+        if selected_profile.heavy_decode_range is not None:
+            heavy_decode_range = selected_profile.heavy_decode_range
+        if selected_profile.heavy_decode_prob is not None:
+            heavy_decode_prob = selected_profile.heavy_decode_prob
 
     if prompt_lengths is None:
         prompt_lengths = [20, 64, 128, 256, 500]
