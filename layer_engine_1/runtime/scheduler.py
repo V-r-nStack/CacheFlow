@@ -107,13 +107,19 @@ class Scheduler:
     @staticmethod
     def _mark_wait_end(sequence: Sequence, now: float) -> None:
         if sequence._wait_start_time is not None:
-            sequence.total_wait_time += max(0.0, now - sequence._wait_start_time)
+            waited = max(0.0, now - sequence._wait_start_time)
+            sequence.total_wait_time += waited
+            sequence.starvation_duration += waited
             sequence._wait_start_time = None
-        if sequence._preempt_start_time is not None:
-            sequence.starvation_duration += max(0.0, now - sequence._preempt_start_time)
-            sequence._preempt_start_time = None
         if sequence.status == SequenceStatus.PREEMPTED:
             sequence.status = SequenceStatus.WAITING
+
+    @staticmethod
+    def _current_starvation(sequence: Sequence, now: float) -> float:
+        starvation = sequence.starvation_duration
+        if sequence._wait_start_time is not None:
+            starvation += max(0.0, now - sequence._wait_start_time)
+        return float(starvation)
 
     def _gather_sequences(self) -> List[Sequence]:
         sequences: List[Sequence] = []
@@ -137,9 +143,7 @@ class Scheduler:
             if wait_time > 0.0:
                 wait_samples.append(wait_time)
 
-            starvation = sequence.starvation_duration
-            if sequence._preempt_start_time is not None:
-                starvation += max(0.0, now - sequence._preempt_start_time)
+            starvation = self._current_starvation(sequence, now)
             if starvation > max_starvation:
                 max_starvation = starvation
 
@@ -169,6 +173,75 @@ class Scheduler:
             "p95_wait_s": float(p95_wait),
             "max_starvation_s": float(max_starvation),
             "short_long_ratio": float(short_long_ratio),
+        }
+
+    def calculate_starvation_distribution(
+        self,
+        bins: Optional[List[float]] = None,
+        short_prompt_threshold: int = 128,
+    ) -> Dict[str, object]:
+        now = time.time()
+        samples: List[float] = []
+        short_samples: List[float] = []
+        long_samples: List[float] = []
+
+        for sequence in self._gather_sequences():
+            starvation = self._current_starvation(sequence, now)
+            if starvation <= 0.0:
+                continue
+            samples.append(starvation)
+            if len(sequence.prompt_token_ids) <= short_prompt_threshold:
+                short_samples.append(starvation)
+            else:
+                long_samples.append(starvation)
+
+        if bins is None:
+            bins = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0]
+
+        def _percentile(values: List[float], q: float) -> float:
+            if not values:
+                return 0.0
+            ordered = sorted(values)
+            idx = max(0, int(math.ceil(q * len(ordered))) - 1)
+            return float(ordered[idx])
+
+        def _mean(values: List[float]) -> float:
+            return float(sum(values) / len(values)) if values else 0.0
+
+        hist_counts = [0 for _ in range(max(len(bins) - 1, 0))]
+        overflow = 0
+        for value in samples:
+            placed = False
+            for idx in range(len(bins) - 1):
+                if bins[idx] <= value < bins[idx + 1]:
+                    hist_counts[idx] += 1
+                    placed = True
+                    break
+            if not placed:
+                overflow += 1
+
+        p50 = _percentile(samples, 0.5)
+        p95 = _percentile(samples, 0.95)
+        p99 = _percentile(samples, 0.99)
+
+        short_p95 = _percentile(short_samples, 0.95)
+        long_p95 = _percentile(long_samples, 0.95)
+        short_avg = _mean(short_samples)
+        long_avg = _mean(long_samples)
+
+        long_tail_ratio_p99_p50 = p99 / p50 if p50 > 0.0 else 0.0
+        long_tail_ratio_long_short_p95 = long_p95 / short_p95 if short_p95 > 0.0 else 0.0
+        long_tail_ratio_long_short_avg = long_avg / short_avg if short_avg > 0.0 else 0.0
+
+        return {
+            "histogram_bins": bins,
+            "histogram_counts": hist_counts,
+            "histogram_overflow": overflow,
+            "p95_starvation_s": p95,
+            "p99_starvation_s": p99,
+            "long_tail_ratio_p99_p50": long_tail_ratio_p99_p50,
+            "long_tail_ratio_long_short_p95": long_tail_ratio_long_short_p95,
+            "long_tail_ratio_long_short_avg": long_tail_ratio_long_short_avg,
         }
 
     def aggregate_latency_metrics(self) -> Dict[str, float]:
@@ -388,7 +461,6 @@ class Scheduler:
         preempt_candidate.release_blocks(memory_manager)
         now = time.time()
         preempt_candidate.preempted_at = now
-        preempt_candidate._preempt_start_time = now
         self._mark_wait_start(preempt_candidate, now)
         with self._waiting_lock:
             self.waiting_queue.append(preempt_candidate)

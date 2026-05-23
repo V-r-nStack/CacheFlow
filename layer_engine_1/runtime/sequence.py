@@ -54,7 +54,6 @@ class Sequence:
     starvation_duration: float = 0.0
     preemption_count: int = 0
     _wait_start_time: Optional[float] = None
-    _preempt_start_time: Optional[float] = None
     _steady_state_itl_sum: float = 0.0
     _steady_state_itl_count: int = 0
 
