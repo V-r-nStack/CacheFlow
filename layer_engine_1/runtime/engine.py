@@ -293,6 +293,8 @@ def run_engine(
                     allocated_kv_slots=allocated_slots,
                     free_kv_slots=free_slots,
                     itl_s=itl_s,
+                    max_batch_size=scheduler.max_batch_size,
+                    active_sequence_ids=[seq.seq_id for seq in scheduler.active_batch],
                     avg_wait_s=fairness["avg_wait_s"],
                     p95_wait_s=fairness["p95_wait_s"],
                     max_starvation_s=fairness["max_starvation_s"],
