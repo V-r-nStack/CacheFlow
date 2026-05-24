@@ -1,66 +1,57 @@
-### `project.md`
+# CacheFlow: Real Status Notes
 
-```markdown
-# Engineering Roadmap: CacheFlow Phase 1
+This file is the candid, day-to-day truth about the project. It is not polished marketing. It is a working note on what exists, what is fragile, and what the system proves.
 
-## Core Objective
+## What Exists Right Now
+- A GPT-2 124M-scale decoder-only model with explicit causal attention and custom weight loading.
+- Autoregressive generation with TTFT and ITL instrumentation.
+- Static KV allocation and logical-to-physical slot mapping.
+- Continuous batching with FCFS, shortest-prompt-first, and fairness-preemptive scheduling.
+- Adversarial workload profiles that force persistent queue buildup and starvation pressure.
+- Runtime tracer exporting queue depth, batch utilization, KV pressure, residency, and starvation metrics.
+- Benchmark harnesses and a Phase 3 evaluation script that produce plots and a Markdown report.
 
-Phase 1 (`layer_engine_1`) establishes the architectural baseline for transformer inference. The goal is to build a mathematically complete, strictly unoptimized autoregressive forward pass. Understanding this computational graph and its massive memory overhead during generation is the prerequisite for future work on KV-caching and advanced runtime scheduling.
+## What It Proves
+- Queue growth under sustained overload is measurable and repeatable.
+- Shortest-prompt-first can starve long sequences and surface fairness tradeoffs.
+- Static KV allocation hits saturation quickly under long-context pressure.
+- Residency metrics show sequence lifespan stretching when overload persists.
 
-## Technical Specifications
+## What Is Still Fragile
+- GPU memory is the first failure mode. Small GPUs need reduced batch size and seq length.
+- High arrival rates can saturate queues so fast that plots flatten unless duration is long.
+- Fairness-preemptive behavior depends heavily on preemption thresholds.
 
-* **Architecture:** Decoder-only Transformer (GPT-2 scale, 124M parameters).
-* **Framework:** PyTorch (Tensors and Autograd only; no high-level NLP abstractions).
-* **Target Environment:** CPU/CUDA (Standard PyTorch execution, no custom C++ kernels yet).
-* **Primary Constraints:** No KV-caching. Recompute the entire sequence at every decoding step to benchmark the compute waste.
+## What Is Not Here (Yet)
+- No paged memory or adaptive KV allocation.
+- No distributed or multi-GPU execution.
+- No production serving API.
 
-## Implementation Sequence
+## Where the Truth Shows Up
+- `runtime/tracer.py` for CSV fields and metric definitions.
+- `runtime/scheduler.py` for starvation and fairness behavior.
+- `runtime/workload.py` for adversarial profile definitions.
 
-The development lifecycle for `layer_engine_1` is strictly divided into functional milestones.
+## How to Reproduce the Pressure Findings
+```bash
+python layer_engine_1/tools/benchmark_scheduler.py \
+  --profiles sustained_overload,starvation_pressure \
+  --duration-s 300
+```
 
-### 1. Initialization and Data Plane
-* Define the `GPTConfig` configuration schema.
-* Implement the script to fetch pre-trained weights.
-* Establish the base vocabulary and tokenization wrapper.
+```bash
+python layer_engine_1/tools/evaluate_phase3.py \
+  --out-dir /home/earthy-zeus/MyProjects/runtime_benchmarks \
+  --profiles sustained_overload,starvation_pressure \
+  --duration-s 300
+```
 
-### 2. Execution Primitives
-* **Embeddings:** Map discrete input IDs to dense vector spaces (Token and Positional). Track tensor shape transformation: `(batch, seq) -> (batch, seq, dim)`.
-* **Causal Attention:** Implement $Q, K, V$ projections. Apply head splitting, the lower-triangular causal mask, and softmax. Calculate the compute-heavy $Q \times K^T$ attention scores.
-* **Feedforward:** Implement the intermediate multi-layer perceptron expansion (4x hidden dimension) and GELU activation.
+## Known Failure Patterns
+- `CUDA out of memory` when batch size or max seq length is too high.
+- Queue depth spikes that never recover when base/burst rates exceed drain rate.
+- Fairness-preemptive can reduce worst starvation, but may reduce throughput.
 
-### 3. Block Assembly and Routing
-* Combine Attention and FFN into a `TransformerBlock`.
-* Route the residual stream cleanly: $x = x + Attention(LayerNorm(x))$.
-* Stack blocks dynamically based on configuration.
-* Map downloaded pre-trained weights directly into custom PyTorch parameters.
-
-### 4. Runtime and Instrumentation
-* Construct the `while` loop for autoregressive greedy decoding.
-* Slice the logits tensor to extract the final timestep probability distribution.
-* Implement decorators for precision timing using `time.perf_counter()`.
-* Log Time to First Token (TTFT) and Inter-Token Latency (ITL) to the console.
-
-## Git Workflow Standard
-
-All development follows a strict feature-branch workflow to maintain a clean history.
-
-* **Main Branch:** `main` (Stable execution only).
-* **Integration Branch:** `dev` (Tested features).
-* **Feature Branches:** `feat/feature-name` (e.g., `feat/causal-attention`).
-
-### Commit Convention
-Commits must be atomic and categorized.
-* `feat:` A new architectural component or script.
-* `fix:` Resolving tensor shape errors or broadcasting issues.
-* `chore:` Updating requirements or formatting.
-* `docs:` Modifying this roadmap or inline tensor shape comments.
-
-### Merge Protocol
-1. Rebase `feat` branch against `dev` locally.
-2. Resolve any conflicts in standard execution files.
-3. Open a Pull Request for self-review.
-4. Merge into `dev` using a fast-forward or squash merge.
-
-## Success Criteria
-
-Phase 1 is considered complete when the engine can ingest a prompt, deterministically generate coherent text using pre-trained weights, and output a detailed latency breakdown of the inference cycle demonstrating the $O(N^2)$ slowdown as sequence length increases.
+## Next Engineering Steps
+- Add more realistic arrival processes for traffic bursts.
+- Calibrate compute pacer to match a fixed throughput budget.
+- Extend evaluation to include utilization vs latency tradeoffs across policies.
