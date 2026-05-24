@@ -65,13 +65,31 @@ class Sequence:
 
     def request_blocks(self, memory_manager: "MemoryManager", target_len: int) -> bool:
         """Ensure the sequence has a logical-to-physical mapping of target_len."""
+        # Prefer BlockTable if attached to the memory_manager
+        block_table = getattr(memory_manager, "block_table", None)
+        if block_table is not None:
+            return block_table.ensure_logical_blocks(self.seq_id, target_len)
 
-        return memory_manager.ensure_mapping_length(self, target_len)
+        # Fallback to legacy MemoryManager API if available
+        ensure_fn = getattr(memory_manager, "ensure_mapping_length", None)
+        if callable(ensure_fn):
+            return ensure_fn(self, target_len)
+
+        raise RuntimeError("No block allocation API available on memory_manager")
 
     def release_blocks(self, memory_manager: "MemoryManager") -> None:
         """Release all mapped blocks for this sequence via the memory manager."""
+        block_table = getattr(memory_manager, "block_table", None)
+        if block_table is not None:
+            block_table.release_sequence(self.seq_id)
+            return
 
-        memory_manager.release_sequence(self)
+        # Fallback to legacy MemoryManager API if available
+        release_fn = getattr(memory_manager, "release_sequence", None)
+        if callable(release_fn):
+            return release_fn(self)
+
+        raise RuntimeError("No block release API available on memory_manager")
 
 
 InferenceRequest = Sequence

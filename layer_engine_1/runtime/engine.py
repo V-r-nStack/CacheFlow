@@ -175,6 +175,19 @@ def run_engine(
                 if logical_len == 0:
                     continue
 
+                    # Allocate discrete logical blocks (pages) via BlockTable
+                    block_table = getattr(memory_manager, "block_table", None)
+                    if block_table is None:
+                        # fallback to legacy mapping
+                        if not _assign_prompt_slots(sequence, memory_manager, prompt_len):
+                            sequence.status = SequenceStatus.FINISHED
+                            sequence.finish_time = time.time()
+                            continue
+                    else:
+                        if not block_table.ensure_logical_blocks(sequence.seq_id, prompt_len):
+                            sequence.status = SequenceStatus.FINISHED
+                            sequence.finish_time = time.time()
+                            continue
                 if generated_len == 0:
                     if not _assign_prompt_slots(sequence, memory_manager, prompt_len):
                         sequence.status = SequenceStatus.FINISHED
@@ -184,9 +197,15 @@ def run_engine(
                         sequence.prompt_token_ids, dtype=torch.long, device=device
                     ).unsqueeze(0)
                 else:
-                    token_capacity = memory_manager.get_token_capacity(sequence)
-                    if token_capacity < logical_len:
-                        raise ValueError("memory manager mapping is behind logical length")
+                    block_table = getattr(memory_manager, "block_table", None)
+                    if block_table is None:
+                        token_capacity = memory_manager.get_token_capacity(sequence)
+                        if token_capacity < logical_len:
+                            raise ValueError("memory manager mapping is behind logical length")
+                    else:
+                        token_capacity = block_table.get_token_capacity(sequence.seq_id)
+                        if token_capacity < logical_len:
+                            raise ValueError("block table mapping is behind logical length")
 
                     input_ids = torch.tensor(
                         [sequence.generated_token_ids[-1]], dtype=torch.long, device=device
