@@ -3,6 +3,7 @@ import csv
 import os
 import sys
 import threading
+import math
 import time
 from typing import Callable, List
 
@@ -17,7 +18,7 @@ from runtime.engine import run_engine
 from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
-from runtime.static_kv_cache import StaticKVCache
+from runtime.page_allocator import PageAllocator
 from runtime.tracer import RuntimeTracer
 from runtime.workload import (
     WORKLOAD_PROFILES,
@@ -51,56 +52,67 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, static_kv_cache=None, slot_mapping=None, memory_manager=None, sequence_id=None):
+    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None):
         x = self.embed(idx)
         return self.proj(x)
 
 
 def test_memory_manager_mapping() -> None:
-    cache = StaticKVCache(
-        max_batch_size=1,
-        max_seq_len=8,
+    page_size = 4
+    total_slots = 1 * 8
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=1,
         head_dim=8,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     seq = Sequence(seq_id=1, prompt_token_ids=[1, 2, 3])
 
     assert memory_manager.ensure_mapping_length(seq, 3)
     mapping = memory_manager.get_mapping(seq)
-    assert len(mapping) == 3
+    expected_pages = int(math.ceil(seq.logical_length / float(page_size)))
+    assert len(mapping) == expected_pages
 
     memory_manager.release_sequence(seq)
     assert memory_manager.get_mapping(seq) == []
-    assert memory_manager.free_slots_count() == cache.total_slots
+    assert memory_manager.free_slots_count() == allocator.total_slots
 
-    _log(f"[INFO] mapping_len=3 free_slots={memory_manager.free_slots_count()}")
+    _log(
+        f"[INFO] mapping_pages={len(mapping)} free_slots={memory_manager.free_slots_count()}"
+    )
 
 
 def test_attention_memory_manager_mapping() -> None:
     attn = CausalMultiHeadAttention(dim=8, num_heads=2)
-    cache = StaticKVCache(
-        max_batch_size=1,
-        max_seq_len=8,
+    page_size = 4
+    total_slots = 1 * 8
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=2,
         head_dim=4,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     seq = Sequence(seq_id=7, prompt_token_ids=[1, 2, 3])
     assert memory_manager.ensure_mapping_length(seq, 3)
 
     x = torch.randn(1, 3, 8)
+    slot_mapping = torch.tensor(
+        memory_manager.get_slot_mapping(seq, seq.logical_length), dtype=torch.long
+    ).unsqueeze(0)
     out = attn(
         x,
-        static_kv_cache=cache,
-        memory_manager=memory_manager,
-        sequence_id=seq.seq_id,
+        page_allocator=allocator,
+        slot_mapping=slot_mapping,
         layer_idx=0,
     )
     assert out.shape == x.shape
@@ -108,16 +120,19 @@ def test_attention_memory_manager_mapping() -> None:
 
 
 def test_batch_prep_memory_manager() -> None:
-    cache = StaticKVCache(
-        max_batch_size=2,
-        max_seq_len=8,
+    page_size = 4
+    total_slots = 2 * 8
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=1,
         head_dim=8,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     seq_a = Sequence(seq_id=1, prompt_token_ids=[10, 11, 12])
     seq_b = Sequence(seq_id=2, prompt_token_ids=[20, 21], generated_token_ids=[30, 31])
 
@@ -132,16 +147,19 @@ def test_batch_prep_memory_manager() -> None:
 
 
 def test_scheduler_eviction_and_preemption() -> None:
-    cache = StaticKVCache(
-        max_batch_size=1,
-        max_seq_len=32,
+    page_size = 8
+    total_slots = 1 * 32
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=1,
         head_dim=8,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     scheduler = Scheduler(max_batch_size=2)
 
     long_seq = Sequence(seq_id=1, prompt_token_ids=[1])
@@ -173,16 +191,19 @@ def test_scheduler_eviction_and_preemption() -> None:
 
 def test_engine_metrics_and_eviction() -> None:
     model = DummyModel(vocab_size=256, max_seq_len=2048)
-    cache = StaticKVCache(
-        max_batch_size=32,
-        max_seq_len=2048,
+    page_size = 16
+    total_slots = 32 * 2048
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=1,
         head_dim=8,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     scheduler = Scheduler(max_batch_size=32)
 
     for seq_id in range(1, 33):
@@ -212,16 +233,19 @@ def test_engine_metrics_and_eviction() -> None:
 
 def test_fairness_tracer_output() -> None:
     model = DummyModel(vocab_size=128, max_seq_len=512)
-    cache = StaticKVCache(
-        max_batch_size=16,
-        max_seq_len=512,
+    page_size = 16
+    total_slots = 16 * 512
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=1,
         head_dim=8,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     scheduler = Scheduler(max_batch_size=16)
 
     for seq_id in range(1, 17):
@@ -258,16 +282,19 @@ def test_fairness_tracer_output() -> None:
 
 def test_async_workload_with_pressure() -> None:
     model = DummyModel(vocab_size=256, max_seq_len=4096)
-    cache = StaticKVCache(
-        max_batch_size=64,
-        max_seq_len=4096,
+    page_size = 16
+    total_slots = 64 * 4096
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=1,
         head_dim=8,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     scheduler = Scheduler(max_batch_size=64)
     stop_event = threading.Event()
     stress_profile = WorkloadProfile(
@@ -315,16 +342,19 @@ def test_async_workload_with_pressure() -> None:
 
 def benchmark_scheduler(iterations: int = 5000, batch_size: int = 256) -> None:
     scheduler = Scheduler(max_batch_size=batch_size)
-    cache = StaticKVCache(
-        max_batch_size=batch_size,
-        max_seq_len=256,
+    page_size = 16
+    total_slots = batch_size * 256
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=1,
         num_heads=1,
         head_dim=8,
         device="cpu",
         dtype=torch.float32,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     sequences = [Sequence(seq_id=i, prompt_token_ids=list(range(128))) for i in range(batch_size)]
 
     start = time.perf_counter()

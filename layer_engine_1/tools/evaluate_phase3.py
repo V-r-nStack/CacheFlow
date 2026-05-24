@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import math
 import os
 import random
 import threading
@@ -23,7 +24,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from runtime.engine import SimulatedComputePacer
 from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
-from runtime.static_kv_cache import StaticKVCache
+from runtime.page_allocator import PageAllocator
 from runtime.tracer import RuntimeTracer
 from runtime.workload import run_synthetic_workload, start_engine_background, stop_engine_background
 
@@ -43,7 +44,7 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, static_kv_cache=None, slot_mapping=None, memory_manager=None, sequence_id=None):
+    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None):
         x = self.embed(idx)
         return self.proj(x)
 
@@ -108,16 +109,19 @@ def _run_one(
     dtype = _dtype_from_name(args.dtype)
 
     model = DummyModel(vocab_size=args.vocab_size, max_seq_len=args.max_seq_len).to(device)
-    cache = StaticKVCache(
-        max_batch_size=args.max_batch_size,
-        max_seq_len=args.max_seq_len,
+    page_size = 16
+    total_slots = args.max_batch_size * args.max_seq_len
+    total_pages = int(math.ceil(total_slots / float(page_size)))
+    allocator = PageAllocator(
+        total_num_pages=total_pages,
+        page_size=page_size,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         head_dim=args.head_dim,
         device=args.device,
         dtype=dtype,
     )
-    memory_manager = MemoryManager(cache)
+    memory_manager = MemoryManager(allocator)
     scheduler = Scheduler(max_batch_size=args.max_batch_size)
     runtime_tracer = RuntimeTracer()
     stop_event = threading.Event()

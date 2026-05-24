@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
-from runtime.memory_manager import MemoryManager
-from runtime.static_kv_cache import StaticKVCache
+from runtime.page_allocator import PageAllocator
 
 
 class CausalMultiHeadAttention(nn.Module):
@@ -34,10 +33,8 @@ class CausalMultiHeadAttention(nn.Module):
         x,
         kv_cache=None,
         layer_idx=None,
-        static_kv_cache: Optional[StaticKVCache] = None,
+        page_allocator: Optional[PageAllocator] = None,
         slot_mapping: Optional[torch.Tensor] = None,
-        memory_manager: Optional[MemoryManager] = None,
-        sequence_id: Optional[int] = None,
     ):
         """Apply causal attention with optional KV cache support."""
 
@@ -49,18 +46,13 @@ class CausalMultiHeadAttention(nn.Module):
 
         query, key, value = qkv[0], qkv[1], qkv[2]
 
-        if static_kv_cache is not None or slot_mapping is not None or memory_manager is not None:
-            if static_kv_cache is None:
-                raise ValueError("static_kv_cache must be provided when using slot mapping")
-            if memory_manager is not None and sequence_id is not None and batch_size == 1:
-                mapping_list = memory_manager.get_mapping_by_id(sequence_id)
-                slot_mapping = torch.tensor(
-                    mapping_list, dtype=torch.long, device=x.device
-                ).unsqueeze(0)
-            elif slot_mapping is None:
-                raise ValueError("slot_mapping must be provided without memory_manager mapping")
+        if page_allocator is not None or slot_mapping is not None:
+            if page_allocator is None:
+                raise ValueError("page_allocator must be provided when using slot mapping")
+            if slot_mapping is None:
+                raise ValueError("slot_mapping must be provided when page_allocator is used")
             if layer_idx is None:
-                raise ValueError("layer_idx must be provided when static_kv_cache is used")
+                raise ValueError("layer_idx must be provided when page_allocator is used")
 
             slot_mapping = slot_mapping.to(device=x.device, dtype=torch.long)
             total_seq_len = int(slot_mapping.size(1))
@@ -71,8 +63,12 @@ class CausalMultiHeadAttention(nn.Module):
             key_to_store = key.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
             value_to_store = value.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
 
-            cache_k = static_kv_cache.cache[0, layer_idx]
-            cache_v = static_kv_cache.cache[1, layer_idx]
+            cache_k = page_allocator.cache[0, layer_idx].view(
+                -1, self.num_heads, self.head_dim
+            )
+            cache_v = page_allocator.cache[1, layer_idx].view(
+                -1, self.num_heads, self.head_dim
+            )
             with torch.no_grad():
                 cache_k.index_copy_(0, write_slots, key_to_store)
                 cache_v.index_copy_(0, write_slots, value_to_store)

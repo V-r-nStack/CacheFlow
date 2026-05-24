@@ -22,7 +22,7 @@ def prepare_continuous_batch(
     Returns a dict with:
     - input_ids: 1D concatenated token IDs for this iteration
     - position_ids: 1D concatenated position IDs for these tokens
-    - slot_mapping: 1D concatenated full slot mapping per sequence
+    - slot_mapping: 1D concatenated slot mapping per sequence
     - input_offsets: start offsets into input_ids for each sequence
     - slot_offsets: start offsets into slot_mapping for each sequence
     - slot_lengths: logical sequence lengths (prompt + generated)
@@ -48,10 +48,10 @@ def prepare_continuous_batch(
 
         if logical_len == 0:
             raise ValueError("Sequence has no prompt or generated tokens")
-        slot_mapping_list = memory_manager.get_mapping(sequence)
+        slot_mapping_list = memory_manager.get_slot_mapping(sequence, logical_len)
         if len(slot_mapping_list) < logical_len:
             raise ValueError(
-                "memory manager mapping must cover the logical sequence length"
+                "memory manager slot mapping must cover the logical sequence length"
             )
 
         if generated_len == 0:

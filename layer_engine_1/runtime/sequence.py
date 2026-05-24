@@ -30,7 +30,7 @@ class Sequence:
     manage prompt replay, decoding, and bookkeeping without coupling this object
     to any model execution code.
 
-    Logical tokens are mapped to physical KV slots through the MemoryManager,
+    Logical tokens are mapped to physical KV pages through the MemoryManager,
     keeping raw slot indices out of this state object.
     """
 

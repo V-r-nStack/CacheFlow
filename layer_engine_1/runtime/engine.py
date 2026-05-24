@@ -104,7 +104,7 @@ def run_engine(
         max_seq_len = int(model.max_seq_len)
 
     device = next(model.parameters()).device
-    static_kv_cache = memory_manager.static_kv_cache
+    page_allocator = memory_manager.page_allocator
 
     metrics_writer = None
     metrics_file = None
@@ -184,8 +184,8 @@ def run_engine(
                         sequence.prompt_token_ids, dtype=torch.long, device=device
                     ).unsqueeze(0)
                 else:
-                    mapping_list = memory_manager.get_mapping(sequence)
-                    if len(mapping_list) < logical_len:
+                    token_capacity = memory_manager.get_token_capacity(sequence)
+                    if token_capacity < logical_len:
                         raise ValueError("memory manager mapping is behind logical length")
 
                     input_ids = torch.tensor(
@@ -199,12 +199,14 @@ def run_engine(
 
                 start_time = time.perf_counter()
                 with torch.inference_mode():
-                    _ = prepare_continuous_batch([sequence], memory_manager, device=device)
+                    batch = prepare_continuous_batch(
+                        [sequence], memory_manager, device=device
+                    )
+                    slot_mapping = batch["slot_mapping"].to(device=device).unsqueeze(0)
                     logits = model(
                         input_ids,
-                        static_kv_cache=static_kv_cache,
-                        memory_manager=memory_manager,
-                        sequence_id=sequence.seq_id,
+                        page_allocator=page_allocator,
+                        slot_mapping=slot_mapping,
                     )
                 elapsed = time.perf_counter() - start_time
 
@@ -285,7 +287,7 @@ def run_engine(
 
             if runtime_tracer is not None:
                 free_slots = memory_manager.free_slots_count()
-                allocated_slots = static_kv_cache.total_slots - free_slots
+                allocated_slots = page_allocator.total_slots - free_slots
                 fairness = scheduler.aggregate_fairness_metrics()
                 latency_breakdown = scheduler.aggregate_latency_metrics()
                 runtime_tracer.record_tick(
