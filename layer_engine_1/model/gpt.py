@@ -50,10 +50,9 @@ class GPT(nn.Module):
         self,
         idx,
         kv_cache=None,
-        page_allocator=None,
-        slot_mapping=None,
-        block_table=None,
+        memory_backend=None,
         sequence_id=None,
+        logical_length=None,
         runtime_tracer=None,
     ):
         """Return per-token logits for the full context."""
@@ -68,12 +67,13 @@ class GPT(nn.Module):
         token_embeds = self.token_emb(idx)
 
         past_seq_len = 0
-        if page_allocator is not None or slot_mapping is not None:
-            if slot_mapping is None:
-                raise ValueError("slot_mapping must be provided when page_allocator is used")
-            if slot_mapping.size(1) < seq_len:
-                raise ValueError("slot_mapping length must be >= input sequence length")
-            past_seq_len = slot_mapping.size(1) - seq_len
+        if memory_backend is not None:
+            if logical_length is None:
+                raise ValueError("logical_length must be provided when memory_backend is used")
+            logical_length = int(logical_length)
+            if logical_length < seq_len:
+                raise ValueError("logical_length must be >= input sequence length")
+            past_seq_len = logical_length - seq_len
         elif kv_cache is not None:
             past_key, _ = kv_cache.get_layer(0)
             if past_key is not None:
@@ -94,10 +94,9 @@ class GPT(nn.Module):
                 x,
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
-                page_allocator=page_allocator,
-                slot_mapping=slot_mapping,
-                block_table=block_table,
+                memory_backend=memory_backend,
                 sequence_id=sequence_id,
+                logical_length=logical_length,
                 runtime_tracer=runtime_tracer,
             )
 

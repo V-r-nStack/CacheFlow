@@ -22,9 +22,8 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from runtime.engine import SimulatedComputePacer
-from runtime.memory_manager import MemoryManager
+from runtime.memory_factory import build_memory_manager
 from runtime.scheduler import Scheduler
-from runtime.page_allocator import PageAllocator
 from runtime.tracer import RuntimeTracer
 from runtime.workload import run_synthetic_workload, start_engine_background, stop_engine_background
 
@@ -44,7 +43,7 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None, block_table=None, runtime_tracer=None):
+    def forward(self, idx, memory_backend=None, sequence_id=None, logical_length=None, runtime_tracer=None, kv_cache=None):
         x = self.embed(idx)
         return self.proj(x)
 
@@ -111,17 +110,16 @@ def _run_one(
     model = DummyModel(vocab_size=args.vocab_size, max_seq_len=args.max_seq_len).to(device)
     page_size = 16
     total_slots = args.max_batch_size * args.max_seq_len
-    total_pages = int(math.ceil(total_slots / float(page_size)))
-    allocator = PageAllocator(
-        total_num_pages=total_pages,
+    memory_manager = build_memory_manager(
+        args.memory_backend,
+        total_slots=total_slots,
         page_size=page_size,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         head_dim=args.head_dim,
-        device=args.device,
+        device=device,
         dtype=dtype,
     )
-    memory_manager = MemoryManager(allocator)
     scheduler = Scheduler(max_batch_size=args.max_batch_size)
     runtime_tracer = RuntimeTracer()
     stop_event = threading.Event()
@@ -367,6 +365,12 @@ def main() -> int:
     parser.add_argument("--pacer-per-sequence-delay-s", type=float, default=0.00005)
     parser.add_argument("--pacer-per-token-delay-s", type=float, default=0.0000002)
     parser.add_argument("--pacer-max-delay-s", type=float, default=0.02)
+    parser.add_argument(
+        "--memory-backend",
+        choices=["contiguous", "paged"],
+        default="paged",
+        help="Select the KV memory architecture to benchmark.",
+    )
     args = parser.parse_args()
 
     if args.duration_s < 300.0:

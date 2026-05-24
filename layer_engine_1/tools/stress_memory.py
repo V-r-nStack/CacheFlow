@@ -19,10 +19,9 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from runtime.engine import SimulatedComputePacer, run_engine
-from runtime.memory_manager import MemoryManager
+from runtime.memory_factory import build_memory_manager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence
-from runtime.page_allocator import PageAllocator
 from runtime.tracer import RuntimeTracer
 from runtime.workload import run_synthetic_workload, start_engine_background, stop_engine_background
 
@@ -41,7 +40,7 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None, block_table=None, runtime_tracer=None):
+    def forward(self, idx, memory_backend=None, sequence_id=None, logical_length=None, runtime_tracer=None, kv_cache=None):
         x = self.embed(idx)
         return self.proj(x)
 
@@ -121,6 +120,12 @@ def main() -> int:
     parser.add_argument("--pacer-max-delay-s", type=float, default=0.02)
     parser.add_argument("--kv-cache-fraction", type=float, default=0.85)
     parser.add_argument(
+        "--memory-backend",
+        choices=["contiguous", "paged"],
+        default="paged",
+        help="Select the KV memory architecture to benchmark.",
+    )
+    parser.add_argument(
         "--fallback-ttft",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -173,16 +178,17 @@ def main() -> int:
     if total_pages <= 0:
         raise RuntimeError("Unable to size KV cache within the available device memory")
 
-    allocator = PageAllocator(
-        total_num_pages=total_pages,
+    memory_manager = build_memory_manager(
+        args.memory_backend,
+        total_slots=total_pages * page_size,
         page_size=page_size,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         head_dim=args.head_dim,
-        device=args.device,
+        device=device,
         dtype=dtype,
+        total_num_pages=total_pages,
     )
-    memory_manager = MemoryManager(allocator)
     scheduler = Scheduler(max_batch_size=args.max_batch_size)
     runtime_tracer = RuntimeTracer()
     stop_event = threading.Event()
@@ -197,7 +203,7 @@ def main() -> int:
     print(
         "[INFO] kv_cache_pages="
         f"{total_pages} requested_pages={requested_total_pages} page_size={page_size} "
-        f"kv_cache_fraction={args.kv_cache_fraction:.2f}"
+        f"backend={args.memory_backend} kv_cache_fraction={args.kv_cache_fraction:.2f}"
     )
 
     thread = start_engine_background(

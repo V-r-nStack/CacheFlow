@@ -15,6 +15,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from model.attention import CausalMultiHeadAttention
 from runtime.batching import prepare_continuous_batch
 from runtime.engine import run_engine
+from runtime.memory_factory import build_memory_manager
 from runtime.memory_manager import MemoryManager
 from runtime.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
@@ -52,7 +53,7 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None, block_table=None, runtime_tracer=None):
+    def forward(self, idx, memory_backend=None, sequence_id=None, logical_length=None, runtime_tracer=None, kv_cache=None):
         x = self.embed(idx)
         return self.proj(x)
 
@@ -75,8 +76,8 @@ def test_memory_manager_mapping() -> None:
 
     assert memory_manager.ensure_mapping_length(seq, 3)
     mapping = memory_manager.get_mapping(seq)
-    expected_pages = int(math.ceil(seq.logical_length / float(page_size)))
-    assert len(mapping) == expected_pages
+    assert len(mapping) == seq.logical_length
+    assert memory_manager.get_token_capacity(seq) >= seq.logical_length
 
     memory_manager.release_sequence(seq)
     assert memory_manager.get_mapping(seq) == []
@@ -85,6 +86,31 @@ def test_memory_manager_mapping() -> None:
     _log(
         f"[INFO] mapping_pages={len(mapping)} free_slots={memory_manager.free_slots_count()}"
     )
+
+
+def test_contiguous_memory_backend_mapping() -> None:
+    page_size = 4
+    total_slots = 1 * 8
+    memory_manager = build_memory_manager(
+        "contiguous",
+        total_slots=total_slots,
+        page_size=page_size,
+        num_layers=1,
+        num_heads=1,
+        head_dim=8,
+        device="cpu",
+        dtype=torch.float32,
+    )
+    assert memory_manager.backend_kind == "contiguous"
+
+    seq = Sequence(seq_id=11, prompt_token_ids=[1, 2, 3])
+    assert memory_manager.ensure_mapping_length(seq, 3)
+    mapping = memory_manager.get_mapping(seq)
+    assert len(mapping) == seq.logical_length
+
+    memory_manager.release_sequence(seq)
+    assert memory_manager.get_mapping(seq) == []
+    assert memory_manager.free_slots_count() == memory_manager.backend.total_slots()
 
 
 def test_attention_memory_manager_mapping() -> None:
@@ -111,9 +137,10 @@ def test_attention_memory_manager_mapping() -> None:
     ).unsqueeze(0)
     out = attn(
         x,
-        page_allocator=allocator,
-        slot_mapping=slot_mapping,
         layer_idx=0,
+        memory_backend=memory_manager.backend,
+        sequence_id=seq.seq_id,
+        logical_length=seq.logical_length,
     )
     assert out.shape == x.shape
     _log(f"[INFO] attention_out_shape={tuple(out.shape)}")
@@ -388,6 +415,7 @@ def test_workload_profiles() -> None:
 
 def run_all() -> None:
     _run_test("memory_manager_mapping", test_memory_manager_mapping)
+    _run_test("contiguous_memory_backend", test_contiguous_memory_backend_mapping)
     _run_test("attention_memory_manager", test_attention_memory_manager_mapping)
     _run_test("batch_prep_memory_manager", test_batch_prep_memory_manager)
     _run_test("scheduler_eviction_preemption", test_scheduler_eviction_and_preemption)

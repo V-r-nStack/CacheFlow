@@ -10,7 +10,6 @@ import threading
 import time
 
 from runtime.memory_manager import MemoryManager
-from runtime.block_table import BlockTable
 from runtime.sequence import Sequence, SequenceStatus
 
 
@@ -80,7 +79,6 @@ class Scheduler:
         if not isinstance(memory_manager, MemoryManager):
             raise TypeError("memory_manager must be a MemoryManager instance")
 
-       
         evicted_sequences: List[Sequence] = []
         remaining_active_batch: List[Sequence] = []
 
@@ -381,32 +379,17 @@ class Scheduler:
             )
 
         free_slots = None
-        block_table: Optional[BlockTable] = None
         if memory_manager is not None:
             if not isinstance(memory_manager, MemoryManager):
                 raise TypeError("memory_manager must be a MemoryManager instance")
-            block_table = getattr(memory_manager, "block_table", None)
-            # Ensure a BlockTable is attached and managed by the scheduler
-            if block_table is None:
-                from runtime.block_table import BlockTable
-
-                block_table = BlockTable(memory_manager.page_allocator)
-                memory_manager.attach_block_table(block_table)
-            if block_table is None:
-                free_slots = memory_manager.free_slots_count()
-            else:
-                free_slots = block_table.free_slots_count() * block_table.page_size
+            free_slots = memory_manager.free_slots_count()
 
         promoted_sequences: List[Sequence] = []
         for sequence in ordered_waiting_queue:
             if len(promoted_sequences) >= available_capacity:
                 break
             if free_slots is not None:
-                required_blocks = int(math.ceil((len(sequence.prompt_token_ids) + int(min_decode_tokens)) / float(block_table.page_size))) if block_table is not None else None
-                if required_blocks is not None:
-                    required_slots = required_blocks * block_table.page_size
-                else:
-                    required_slots = len(sequence.prompt_token_ids) + int(min_decode_tokens)
+                required_slots = len(sequence.prompt_token_ids) + int(min_decode_tokens)
                 if required_slots > free_slots:
                     continue
                 free_slots -= required_slots
@@ -456,10 +439,6 @@ class Scheduler:
 
         if waiting_depth <= waiting_threshold:
             return None
-        
-         # Obtain BlockTable if attached so we can compute page-aligned requirements
-        block_table = getattr(memory_manager, "block_table", None)
-
 
         preempt_candidate = None
         preempt_len = -1
@@ -489,11 +468,7 @@ class Scheduler:
         free_slots = memory_manager.free_slots_count()
         admissible = []
         for sequence in sorted(waiting_snapshot, key=lambda seq: len(seq.prompt_token_ids)):
-            required_blocks = int(math.ceil((len(sequence.prompt_token_ids) + int(min_decode_tokens)) / float(block_table.page_size))) if block_table is not None else None
-            if required_blocks is not None:
-                required_slots = required_blocks * block_table.page_size
-            else:
-                required_slots = len(sequence.prompt_token_ids) + int(min_decode_tokens)
+            required_slots = len(sequence.prompt_token_ids) + int(min_decode_tokens)
             if required_slots <= free_slots:
                 admissible.append(sequence)
                 free_slots -= required_slots

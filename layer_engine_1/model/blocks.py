@@ -75,10 +75,9 @@ class TransformerBlock(nn.Module):
         x,
         kv_cache=None,
         layer_idx=None,
-        page_allocator=None,
-        slot_mapping=None,
-        block_table=None,
+        memory_backend=None,
         sequence_id=None,
+        logical_length=None,
         runtime_tracer=None,
     ):
         """Run attention and MLP residual branches."""
@@ -89,10 +88,9 @@ class TransformerBlock(nn.Module):
             x_norm,
             kv_cache=kv_cache,
             layer_idx=layer_idx,
-            page_allocator=page_allocator,
-            slot_mapping=slot_mapping,
-            block_table=block_table,
+            memory_backend=memory_backend,
             sequence_id=sequence_id,
+            logical_length=logical_length,
             runtime_tracer=runtime_tracer,
         )
         x = x + attn_out

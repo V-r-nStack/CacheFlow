@@ -5,7 +5,6 @@ from typing import Dict, List, Optional
 import torch
 
 from runtime.memory_manager import MemoryManager
-from runtime.block_table import BlockTable
 from runtime.sequence import Sequence
 
 
@@ -49,11 +48,7 @@ def prepare_continuous_batch(
 
         if logical_len == 0:
             raise ValueError("Sequence has no prompt or generated tokens")
-        # Require BlockTable for logical-to-physical mapping
-        block_table: Optional[BlockTable] = getattr(memory_manager, "block_table", None)
-        if block_table is None:
-            raise RuntimeError("BlockTable not attached to memory_manager; scheduler must manage BlockTable")
-        slot_mapping_list = block_table.get_slot_mapping(sequence.seq_id, logical_len)
+        slot_mapping_list = memory_manager.get_slot_mapping(sequence, logical_len)
         if len(slot_mapping_list) < logical_len:
             raise ValueError(
                 "memory manager slot mapping must cover the logical sequence length"
