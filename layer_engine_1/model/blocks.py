@@ -79,6 +79,7 @@ class TransformerBlock(nn.Module):
         slot_mapping=None,
         block_table=None,
         sequence_id=None,
+        runtime_tracer=None,
     ):
         """Run attention and MLP residual branches."""
 
@@ -92,6 +93,7 @@ class TransformerBlock(nn.Module):
             slot_mapping=slot_mapping,
             block_table=block_table,
             sequence_id=sequence_id,
+            runtime_tracer=runtime_tracer,
         )
         x = x + attn_out
 

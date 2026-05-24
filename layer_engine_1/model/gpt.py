@@ -54,6 +54,7 @@ class GPT(nn.Module):
         slot_mapping=None,
         block_table=None,
         sequence_id=None,
+        runtime_tracer=None,
     ):
         """Return per-token logits for the full context."""
 
@@ -97,6 +98,7 @@ class GPT(nn.Module):
                 slot_mapping=slot_mapping,
                 block_table=block_table,
                 sequence_id=sequence_id,
+                runtime_tracer=runtime_tracer,
             )
 
         x = self.final_norm(x)

@@ -59,6 +59,8 @@ class PageAllocator:
         )
 
         self._free_pages: Deque[int] = deque(range(total_num_pages))
+        self.total_pages_allocated = 0
+        self.total_pages_freed = 0
 
     def allocate_pages(self, num_pages: int) -> List[int]:
         """Allocate a list of page indices from the free pool."""
@@ -68,13 +70,18 @@ class PageAllocator:
             return []
         if num_pages > len(self._free_pages):
             raise RuntimeError("No KV pages available")
-        return [int(self._free_pages.popleft()) for _ in range(num_pages)]
+        allocated = [int(self._free_pages.popleft()) for _ in range(num_pages)]
+        self.total_pages_allocated += len(allocated)
+        return allocated
 
     def free_pages(self, page_indices: Iterable[int]) -> None:
         """Return page indices back to the free pool."""
 
+        freed_count = 0
         for page_index in page_indices:
             self._free_pages.append(int(page_index))
+            freed_count += 1
+        self.total_pages_freed += freed_count
 
     def free_pages_count(self) -> int:
         """Return the number of available pages."""

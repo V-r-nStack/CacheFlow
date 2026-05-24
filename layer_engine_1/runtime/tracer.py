@@ -132,6 +132,9 @@ class RuntimeTracer:
     _max_batch_occupancy_max_s: float = 0.0
     _last_allocated_kv_slots: Optional[int] = None
     _last_queue_depth: Optional[int] = None
+    _last_pages_allocated: Optional[int] = None
+    _last_pages_freed: Optional[int] = None
+    _pending_page_gather_latency_s: float = 0.0
     _residency_analyzer: ResidencyAnalyzer = field(default_factory=ResidencyAnalyzer)
 
     def _update_batch_util_stats(self, batch_utilization_ratio: Optional[float]) -> Dict[str, float]:
@@ -157,6 +160,14 @@ class RuntimeTracer:
         for sequence in sequences:
             self._residency_analyzer.record_completion(sequence, float(timestamp))
 
+    def record_page_gather_latency(self, latency_s: float) -> None:
+        self._pending_page_gather_latency_s += max(0.0, float(latency_s))
+
+    def consume_page_gather_latency(self) -> float:
+        latency_s = float(self._pending_page_gather_latency_s)
+        self._pending_page_gather_latency_s = 0.0
+        return latency_s
+
     def record_tick(
         self,
         timestamp: float,
@@ -165,6 +176,11 @@ class RuntimeTracer:
         allocated_kv_slots: int,
         free_kv_slots: int,
         itl_s: float,
+        total_kv_slots: Optional[int] = None,
+        logical_kv_slots: Optional[int] = None,
+        total_pages_allocated: Optional[int] = None,
+        total_pages_freed: Optional[int] = None,
+        page_gather_latency_s: Optional[float] = None,
         max_batch_size: Optional[int] = None,
         active_sequence_ids: Optional[List[int]] = None,
         avg_wait_s: Optional[float] = None,
@@ -219,6 +235,8 @@ class RuntimeTracer:
         kv_allocation_churn_rate = 0.0
         kv_allocated_per_step = 0.0
         kv_freed_per_step = 0.0
+        pages_allocated_per_step = 0.0
+        pages_freed_per_step = 0.0
         if self._last_allocated_kv_slots is not None and dt_s > 0.0:
             delta_slots = int(allocated_kv_slots) - int(self._last_allocated_kv_slots)
             kv_allocation_churn_rate = abs(delta_slots) / dt_s
@@ -227,6 +245,29 @@ class RuntimeTracer:
             elif delta_slots < 0:
                 kv_freed_per_step = float(-delta_slots)
         self._last_allocated_kv_slots = int(allocated_kv_slots)
+
+        allocator_churn_rate = 0.0
+        if total_pages_allocated is not None and total_pages_freed is not None and dt_s > 0.0:
+            if self._last_pages_allocated is not None and self._last_pages_freed is not None:
+                delta_allocated_pages = int(total_pages_allocated) - int(self._last_pages_allocated)
+                delta_freed_pages = int(total_pages_freed) - int(self._last_pages_freed)
+                pages_allocated_per_step = float(max(delta_allocated_pages, 0))
+                pages_freed_per_step = float(max(delta_freed_pages, 0))
+                allocator_churn_rate = (pages_allocated_per_step + pages_freed_per_step) / dt_s
+            self._last_pages_allocated = int(total_pages_allocated)
+            self._last_pages_freed = int(total_pages_freed)
+
+        if page_gather_latency_s is None:
+            page_gather_latency_s = 0.0
+
+        internal_fragmentation_ratio = 0.0
+        if logical_kv_slots is not None and allocated_kv_slots > 0:
+            empty_slots = max(0, int(allocated_kv_slots) - int(logical_kv_slots))
+            internal_fragmentation_ratio = (empty_slots / float(allocated_kv_slots)) * 100.0
+
+        page_pool_occupancy = 0.0
+        if total_kv_slots is not None and total_kv_slots > 0:
+            page_pool_occupancy = (int(allocated_kv_slots) / float(total_kv_slots)) * 100.0
 
         queue_growth_rate = 0.0
         if self._last_queue_depth is not None and dt_s > 0.0:
@@ -273,6 +314,10 @@ class RuntimeTracer:
                 "idle_decode_slots": None if idle_decode_slots is None else int(idle_decode_slots),
                 "queue_persistence_ratio": float(queue_persistence_ratio),
                 "max_batch_occupancy_duration": float(max_batch_occupancy_duration),
+                "internal_fragmentation_ratio": float(internal_fragmentation_ratio),
+                "allocator_churn_rate": float(allocator_churn_rate),
+                "page_pool_occupancy": float(page_pool_occupancy),
+                "page_gather_latency": float(page_gather_latency_s),
                 "active_sequence_residency_half_life": None
                 if residency_metrics["active_sequence_residency_half_life"] is None
                 else float(residency_metrics["active_sequence_residency_half_life"]),
@@ -293,6 +338,8 @@ class RuntimeTracer:
                 "kv_freed_per_step": float(kv_freed_per_step),
                 "queue_growth_rate": float(queue_growth_rate),
                 "kv_allocation_churn_rate": float(kv_allocation_churn_rate),
+                "pages_allocated_per_step": float(pages_allocated_per_step),
+                "pages_freed_per_step": float(pages_freed_per_step),
                 "avg_batch_utilization": utilization_stats["avg"],
                 "p95_batch_utilization": utilization_stats["p95"],
             }

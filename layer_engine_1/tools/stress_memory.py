@@ -41,7 +41,7 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None, block_table=None):
+    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None, block_table=None, runtime_tracer=None):
         x = self.embed(idx)
         return self.proj(x)
 
@@ -120,6 +120,12 @@ def main() -> int:
     parser.add_argument("--pacer-per-token-delay-s", type=float, default=0.0000002)
     parser.add_argument("--pacer-max-delay-s", type=float, default=0.02)
     parser.add_argument("--kv-cache-fraction", type=float, default=0.85)
+    parser.add_argument(
+        "--fallback-ttft",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Populate TTFT on completion if the exact first-token timestamp was not recorded.",
+    )
     args = parser.parse_args()
 
     if args.gpu_preset:
@@ -205,6 +211,7 @@ def main() -> int:
         min_decode_tokens=args.min_decode_tokens,
         runtime_tracer=runtime_tracer,
         compute_pacer=compute_pacer,
+        fallback_ttft=args.fallback_ttft,
     )
 
     async def _run_workload() -> None:

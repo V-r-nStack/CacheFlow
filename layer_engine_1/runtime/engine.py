@@ -79,6 +79,20 @@ def _assign_prompt_slots(
     return sequence.request_blocks(memory_manager, prompt_len)
 
 
+def _apply_ttft_fallback(sequence: Sequence) -> None:
+    if sequence.ttft_s is not None:
+        return
+
+    start_time = sequence.queued_at or sequence.admitted_at or sequence.arrival_time
+    end_time = (
+        sequence.first_decode_end_at
+        or sequence.prefill_end_at
+        or sequence.finish_time
+        or time.time()
+    )
+    sequence.ttft_s = max(0.0, float(end_time) - float(start_time))
+
+
 def run_engine(
     model,
     scheduler: Scheduler,
@@ -97,6 +111,7 @@ def run_engine(
     runtime_tracer: Optional[RuntimeTracer] = None,
     tracer_dump_path: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
+    fallback_ttft: bool = True,
 ) -> None:
     """Run the continuous decoding loop until all work is complete."""
 
@@ -229,6 +244,7 @@ def run_engine(
                         slot_mapping=slot_mapping,
                         block_table=block_table,
                         sequence_id=sequence.seq_id,
+                        runtime_tracer=runtime_tracer,
                     )
                 elapsed = time.perf_counter() - start_time
 
@@ -263,12 +279,18 @@ def run_engine(
                 total_itl_s += elapsed
 
                 if max_seq_len is not None and sequence.logical_length >= max_seq_len:
+                    if fallback_ttft:
+                        _apply_ttft_fallback(sequence)
                     sequence.status = SequenceStatus.FINISHED
                     sequence.finish_time = time.time()
                 elif sequence.decode_limit is not None and len(sequence.generated_token_ids) >= sequence.decode_limit:
+                    if fallback_ttft:
+                        _apply_ttft_fallback(sequence)
                     sequence.status = SequenceStatus.FINISHED
                     sequence.finish_time = time.time()
                 elif next_token_id == eos_token_id:
+                    if fallback_ttft:
+                        _apply_ttft_fallback(sequence)
                     sequence.status = SequenceStatus.FINISHED
                     sequence.finish_time = time.time()
 
@@ -310,6 +332,7 @@ def run_engine(
             if runtime_tracer is not None:
                 free_slots = memory_manager.free_slots_count()
                 allocated_slots = page_allocator.total_slots - free_slots
+                page_gather_latency_s = runtime_tracer.consume_page_gather_latency()
                 fairness = scheduler.aggregate_fairness_metrics()
                 latency_breakdown = scheduler.aggregate_latency_metrics()
                 runtime_tracer.record_tick(
@@ -319,6 +342,11 @@ def run_engine(
                     allocated_kv_slots=allocated_slots,
                     free_kv_slots=free_slots,
                     itl_s=itl_s,
+                    total_kv_slots=page_allocator.total_slots,
+                    logical_kv_slots=sum(seq.logical_length for seq in scheduler.active_batch),
+                    total_pages_allocated=page_allocator.total_pages_allocated,
+                    total_pages_freed=page_allocator.total_pages_freed,
+                    page_gather_latency_s=page_gather_latency_s,
                     max_batch_size=scheduler.max_batch_size,
                     active_sequence_ids=[seq.seq_id for seq in scheduler.active_batch],
                     avg_wait_s=fairness["avg_wait_s"],

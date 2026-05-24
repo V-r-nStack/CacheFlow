@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
+import time
 from typing import Optional
 
 from runtime.block_table import BlockTable
 from runtime.page_allocator import PageAllocator
+from runtime.tracer import RuntimeTracer
 
 
 class CausalMultiHeadAttention(nn.Module):
@@ -38,6 +40,7 @@ class CausalMultiHeadAttention(nn.Module):
         slot_mapping: Optional[torch.Tensor] = None,
         block_table: Optional[BlockTable] = None,
         sequence_id: Optional[int] = None,
+        runtime_tracer: Optional[RuntimeTracer] = None,
     ):
         """Apply causal attention with optional KV cache support."""
 
@@ -86,6 +89,7 @@ class CausalMultiHeadAttention(nn.Module):
                     raise ValueError("block_table returned no physical pages for sequence")
 
                 page_indices = torch.tensor(page_indices, device=x.device, dtype=torch.long)
+                gather_start = time.perf_counter()
                 cache_k_pages = page_allocator.cache[0, layer_idx].index_select(0, page_indices)
                 cache_v_pages = page_allocator.cache[1, layer_idx].index_select(0, page_indices)
 
@@ -97,6 +101,8 @@ class CausalMultiHeadAttention(nn.Module):
                 value = cache_v_flat[:total_seq_len]
                 key = key.reshape(1, total_seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
                 value = value.reshape(1, total_seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+                if runtime_tracer is not None:
+                    runtime_tracer.record_page_gather_latency(time.perf_counter() - gather_start)
             else:
                 read_slots = slot_mapping.reshape(-1)
                 key = flat_cache_k.index_select(0, read_slots)
