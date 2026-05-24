@@ -41,7 +41,7 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None):
+    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None, block_table=None):
         x = self.embed(idx)
         return self.proj(x)
 
@@ -64,6 +64,32 @@ def _count_total_generated(scheduler: Scheduler) -> int:
 
 def _ensure_out_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def _estimate_available_kv_pages(
+    device: torch.device,
+    page_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_dim: int,
+    dtype: torch.dtype,
+    kv_cache_fraction: float,
+) -> int:
+    """Estimate a safe KV page budget from available device memory."""
+
+    page_bytes = 2 * num_layers * page_size * num_heads * head_dim * torch.tensor([], dtype=dtype).element_size()
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return 0
+
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
+    except Exception:
+        free_bytes = torch.cuda.get_device_properties(device).total_memory
+
+    usable_bytes = int(free_bytes * float(kv_cache_fraction))
+    if usable_bytes <= 0:
+        return 0
+    return max(1, usable_bytes // int(page_bytes))
 
 
 def main() -> int:
@@ -93,6 +119,7 @@ def main() -> int:
     parser.add_argument("--pacer-per-sequence-delay-s", type=float, default=0.00005)
     parser.add_argument("--pacer-per-token-delay-s", type=float, default=0.0000002)
     parser.add_argument("--pacer-max-delay-s", type=float, default=0.02)
+    parser.add_argument("--kv-cache-fraction", type=float, default=0.85)
     args = parser.parse_args()
 
     if args.gpu_preset:
@@ -120,8 +147,26 @@ def main() -> int:
 
     model = DummyModel(vocab_size=args.vocab_size, max_seq_len=args.max_seq_len).to(device)
     page_size = 16
-    total_slots = args.max_batch_size * args.max_seq_len
-    total_pages = int(math.ceil(total_slots / float(page_size)))
+    requested_total_slots = args.max_batch_size * args.max_seq_len
+    requested_total_pages = int(math.ceil(requested_total_slots / float(page_size)))
+
+    if device.type == "cuda":
+        available_pages = _estimate_available_kv_pages(
+            device=device,
+            page_size=page_size,
+            num_layers=args.num_layers,
+            num_heads=args.num_heads,
+            head_dim=args.head_dim,
+            dtype=dtype,
+            kv_cache_fraction=args.kv_cache_fraction,
+        )
+        total_pages = min(requested_total_pages, available_pages)
+    else:
+        total_pages = requested_total_pages
+
+    if total_pages <= 0:
+        raise RuntimeError("Unable to size KV cache within the available device memory")
+
     allocator = PageAllocator(
         total_num_pages=total_pages,
         page_size=page_size,
@@ -141,6 +186,12 @@ def main() -> int:
         per_sequence_delay_s=args.pacer_per_sequence_delay_s,
         per_token_delay_s=args.pacer_per_token_delay_s,
         max_delay_s=args.pacer_max_delay_s,
+    )
+
+    print(
+        "[INFO] kv_cache_pages="
+        f"{total_pages} requested_pages={requested_total_pages} page_size={page_size} "
+        f"kv_cache_fraction={args.kv_cache_fraction:.2f}"
     )
 
     thread = start_engine_background(

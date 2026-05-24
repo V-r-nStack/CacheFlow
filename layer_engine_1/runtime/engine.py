@@ -222,10 +222,13 @@ def run_engine(
                         [sequence], memory_manager, device=device
                     )
                     slot_mapping = batch["slot_mapping"].to(device=device).unsqueeze(0)
+                    block_table = getattr(memory_manager, "block_table", None)
                     logits = model(
                         input_ids,
                         page_allocator=page_allocator,
                         slot_mapping=slot_mapping,
+                        block_table=block_table,
+                        sequence_id=sequence.seq_id,
                     )
                 elapsed = time.perf_counter() - start_time
 

@@ -52,7 +52,7 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(vocab_size, 8)
         self.proj = nn.Linear(8, vocab_size)
 
-    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None):
+    def forward(self, idx, page_allocator=None, slot_mapping=None, memory_manager=None, sequence_id=None, block_table=None):
         x = self.embed(idx)
         return self.proj(x)
 

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
+from runtime.block_table import BlockTable
 from runtime.page_allocator import PageAllocator
 
 
@@ -35,6 +36,8 @@ class CausalMultiHeadAttention(nn.Module):
         layer_idx=None,
         page_allocator: Optional[PageAllocator] = None,
         slot_mapping: Optional[torch.Tensor] = None,
+        block_table: Optional[BlockTable] = None,
+        sequence_id: Optional[int] = None,
     ):
         """Apply causal attention with optional KV cache support."""
 
@@ -46,13 +49,14 @@ class CausalMultiHeadAttention(nn.Module):
 
         query, key, value = qkv[0], qkv[1], qkv[2]
 
-        if page_allocator is not None or slot_mapping is not None:
+        if page_allocator is not None or slot_mapping is not None or block_table is not None:
             if page_allocator is None:
                 raise ValueError("page_allocator must be provided when using slot mapping")
-            if slot_mapping is None:
-                raise ValueError("slot_mapping must be provided when page_allocator is used")
             if layer_idx is None:
-                raise ValueError("layer_idx must be provided when page_allocator is used")
+                raise ValueError("layer_idx must be provided when paged KV is used")
+
+            if slot_mapping is None:
+                raise ValueError("slot_mapping must be provided when paged KV is used")
 
             slot_mapping = slot_mapping.to(device=x.device, dtype=torch.long)
             total_seq_len = int(slot_mapping.size(1))
@@ -63,23 +67,44 @@ class CausalMultiHeadAttention(nn.Module):
             key_to_store = key.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
             value_to_store = value.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
 
-            cache_k = page_allocator.cache[0, layer_idx].view(
+            flat_cache_k = page_allocator.cache[0, layer_idx].view(
                 -1, self.num_heads, self.head_dim
             )
-            cache_v = page_allocator.cache[1, layer_idx].view(
+            flat_cache_v = page_allocator.cache[1, layer_idx].view(
                 -1, self.num_heads, self.head_dim
             )
             with torch.no_grad():
-                cache_k.index_copy_(0, write_slots, key_to_store)
-                cache_v.index_copy_(0, write_slots, value_to_store)
+                flat_cache_k.index_copy_(0, write_slots, key_to_store)
+                flat_cache_v.index_copy_(0, write_slots, value_to_store)
 
-            read_slots = slot_mapping.reshape(-1)
-            key = cache_k.index_select(0, read_slots)
-            value = cache_v.index_select(0, read_slots)
-            key = key.reshape(batch_size, total_seq_len, self.num_heads, self.head_dim)
-            value = value.reshape(batch_size, total_seq_len, self.num_heads, self.head_dim)
-            key = key.permute(0, 2, 1, 3)
-            value = value.permute(0, 2, 1, 3)
+            if block_table is not None:
+                if sequence_id is None:
+                    raise ValueError("sequence_id must be provided when block_table is used")
+
+                page_indices = block_table.get_block_mapping(sequence_id)
+                if not page_indices:
+                    raise ValueError("block_table returned no physical pages for sequence")
+
+                page_indices = torch.tensor(page_indices, device=x.device, dtype=torch.long)
+                cache_k_pages = page_allocator.cache[0, layer_idx].index_select(0, page_indices)
+                cache_v_pages = page_allocator.cache[1, layer_idx].index_select(0, page_indices)
+
+                # Rebuild a temporary contiguous KV buffer from scattered pages.
+                cache_k_flat = cache_k_pages.contiguous().view(-1, self.num_heads, self.head_dim)
+                cache_v_flat = cache_v_pages.contiguous().view(-1, self.num_heads, self.head_dim)
+
+                key = cache_k_flat[:total_seq_len]
+                value = cache_v_flat[:total_seq_len]
+                key = key.reshape(1, total_seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+                value = value.reshape(1, total_seq_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+            else:
+                read_slots = slot_mapping.reshape(-1)
+                key = flat_cache_k.index_select(0, read_slots)
+                value = flat_cache_v.index_select(0, read_slots)
+                key = key.reshape(batch_size, total_seq_len, self.num_heads, self.head_dim)
+                value = value.reshape(batch_size, total_seq_len, self.num_heads, self.head_dim)
+                key = key.permute(0, 2, 1, 3)
+                value = value.permute(0, 2, 1, 3)
 
             if key.dtype != query.dtype:
                 key = key.to(query.dtype)

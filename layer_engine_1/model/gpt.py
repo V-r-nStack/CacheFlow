@@ -52,6 +52,8 @@ class GPT(nn.Module):
         kv_cache=None,
         page_allocator=None,
         slot_mapping=None,
+        block_table=None,
+        sequence_id=None,
     ):
         """Return per-token logits for the full context."""
 
@@ -93,6 +95,8 @@ class GPT(nn.Module):
                 layer_idx=layer_idx,
                 page_allocator=page_allocator,
                 slot_mapping=slot_mapping,
+                block_table=block_table,
+                sequence_id=sequence_id,
             )
 
         x = self.final_norm(x)
