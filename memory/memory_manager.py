@@ -44,7 +44,7 @@ class MemoryManager:
         return self._backend.ensure_sequence_capacity(sequence.seq_id, target_len)
 
     def get_mapping(self, sequence):
-        return self._backend.get_slot_mapping(sequence.seq_id, sequence.logical_length)
+        return self._backend.get_mapping(sequence.seq_id)
 
     def get_slot_mapping(self, sequence, target_len: int):
         return self._backend.get_slot_mapping(sequence.seq_id, target_len)

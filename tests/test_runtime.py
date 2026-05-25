@@ -76,7 +76,7 @@ def test_memory_manager_mapping() -> None:
 
     assert memory_manager.ensure_mapping_length(seq, 3)
     mapping = memory_manager.get_mapping(seq)
-    assert len(mapping) == seq.logical_length
+    assert len(mapping) == math.ceil(seq.logical_length / float(page_size))
     assert memory_manager.get_token_capacity(seq) >= seq.logical_length
 
     memory_manager.release_sequence(seq)

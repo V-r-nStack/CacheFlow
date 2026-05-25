@@ -48,6 +48,10 @@ class MemoryBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_mapping(self, sequence_id: int) -> List[int]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_slot_mapping(self, sequence_id: int, target_len: int) -> List[int]:
         raise NotImplementedError
 
@@ -193,6 +197,13 @@ class ContiguousMemoryBackend(MemoryBackend):
         self._free_ranges.append((start, length))
         self._merge_free_ranges()
 
+    def get_mapping(self, sequence_id: int) -> List[int]:
+        allocation = self._allocations.get(int(sequence_id))
+        if allocation is None:
+            return []
+        start, length = allocation
+        return list(range(start, start + length))
+
     def get_slot_mapping(self, sequence_id: int, target_len: int) -> List[int]:
         target_len = int(target_len)
         if target_len <= 0:
@@ -287,6 +298,9 @@ class PagedMemoryBackend(MemoryBackend):
 
     def release_sequence(self, sequence_id: int) -> None:
         self.block_table.release_sequence(sequence_id)
+
+    def get_mapping(self, sequence_id: int) -> List[int]:
+        return self.block_table.get_block_mapping(sequence_id)
 
     def get_slot_mapping(self, sequence_id: int, target_len: int) -> List[int]:
         return self.block_table.get_slot_mapping(sequence_id, target_len)

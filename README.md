@@ -139,20 +139,6 @@ The two plots together reveal topology-induced runtime behavior: queue growth is
 - Memory topology strongly influenced runtime stability under scheduler pressure.
 - Queue depth, residency pressure, and allocator churn are coupled signals, not independent metrics.
 
-## What This Project Is Not
-
-CacheFlow is not:
-
-- a chatbot project
-- an API wrapper
-- a RAG application
-- a LangChain or OpenAI integration
-- a fine-tuning framework
-- a distributed serving system
-- a CUDA kernel optimization project
-- a FlashAttention reimplementation
-
-The project focuses on runtime memory semantics and serving behavior under pressure.
 
 ## Repository Layout
 
