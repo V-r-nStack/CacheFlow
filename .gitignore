@@ -68,8 +68,7 @@ token_secret.txt
 .cache/
 
 # Data / outputs
-reports/
-plots/
+
 
 # Compiled python
 *.pyc

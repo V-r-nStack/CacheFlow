@@ -1,0 +1,5 @@
+profile,memory_backend,throughput_toks_per_s,max_queue_depth,p95_queue_depth,avg_residency,max_residency,avg_allocator_churn_rate,avg_page_gather_latency_s,final_internal_fragmentation_ratio,final_page_pool_occupancy,trace_path
+sustained_overload,contiguous,502.591907799322,92881.0,91704.59999999999,63.96404109589041,64.0,484104.1939085975,0.0,0.13549274902085318,50.15609072375128,/tmp/cacheflow_final_benchmark/traces/trace_sustained_overload_contiguous.csv
+sustained_overload,paged,728.4019135254154,83826.0,82461.95,63.9157720891825,64.0,4783.784226309598,0.0,1.1282413563829787,51.104315324498806,/tmp/cacheflow_final_benchmark/traces/trace_sustained_overload_paged.csv
+starvation_pressure,contiguous,1185.9077563653884,47822.0,46967.799999999996,63.752757600215226,64.0,254313.0562869081,0.0,0.5222784396931615,13.01180767923887,/tmp/cacheflow_final_benchmark/traces/trace_starvation_pressure_contiguous.csv
+starvation_pressure,paged,1412.8551066385944,45301.0,44354.24999999999,63.78072179077204,64.0,6704.767407189892,0.0,4.314678284182306,12.674142031940198,/tmp/cacheflow_final_benchmark/traces/trace_starvation_pressure_paged.csv

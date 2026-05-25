@@ -1,0 +1,3 @@
+profile,contiguous_max_queue_depth,paged_max_queue_depth,queue_depth_ratio_contiguous_over_paged,contiguous_avg_churn,paged_avg_churn,contiguous_avg_residency,paged_avg_residency
+starvation_pressure,47822.0,45301.0,1.055649985651531,254313.0562869081,6704.767407189892,63.752757600215226,63.78072179077204
+sustained_overload,92881.0,83826.0,1.108021377615537,484104.1939085975,4783.784226309598,63.96404109589041,63.9157720891825
