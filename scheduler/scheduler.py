@@ -9,7 +9,7 @@ import math
 import threading
 import time
 
-from runtime.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from runtime.sequence import Sequence, SequenceStatus
 
 

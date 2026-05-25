@@ -11,10 +11,10 @@ from typing import List, Optional
 
 import torch
 
-from runtime.memory_manager import MemoryManager
-from runtime.scheduler import Scheduler
+from memory.memory_manager import MemoryManager
+from scheduler.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
-from runtime.tracer import RuntimeTracer
+from tracing.tracer import RuntimeTracer
 
 
 @dataclass

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List
 
-from runtime.page_allocator import PageAllocator
+from memory.page_allocator import PageAllocator
 
 
 class BlockTable:

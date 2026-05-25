@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence as SeqType
 
 from runtime.engine import run_engine
-from runtime.memory_manager import MemoryManager
-from runtime.scheduler import Scheduler
+from memory.memory_manager import MemoryManager
+from scheduler.scheduler import Scheduler
 from runtime.sequence import Sequence
 
 

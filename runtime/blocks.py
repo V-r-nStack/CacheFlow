@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-from .attention import CausalMultiHeadAttention
+from attention.attention import CausalMultiHeadAttention
 
 
 class NewGELUActivation(nn.Module):

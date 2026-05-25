@@ -19,11 +19,11 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from runtime.engine import SimulatedComputePacer, run_engine
-from runtime.memory_factory import build_memory_manager
-from runtime.scheduler import Scheduler
+from memory.memory_factory import build_memory_manager
+from scheduler.scheduler import Scheduler
 from runtime.sequence import Sequence
-from runtime.tracer import RuntimeTracer
-from runtime.workload import run_synthetic_workload, start_engine_background, stop_engine_background
+from tracing.tracer import RuntimeTracer
+from workloads.workload import run_synthetic_workload, start_engine_background, stop_engine_background
 
 
 @dataclass

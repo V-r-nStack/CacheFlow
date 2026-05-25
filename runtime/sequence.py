@@ -10,7 +10,7 @@ from time import time
 from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from runtime.memory_manager import MemoryManager
+    from memory.memory_manager import MemoryManager
 
 
 class SequenceStatus(str, Enum):

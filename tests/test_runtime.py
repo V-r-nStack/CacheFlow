@@ -12,16 +12,16 @@ import torch.nn as nn
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from model.attention import CausalMultiHeadAttention
+from attention.attention import CausalMultiHeadAttention
 from runtime.batching import prepare_continuous_batch
 from runtime.engine import run_engine
-from runtime.memory_factory import build_memory_manager
-from runtime.memory_manager import MemoryManager
-from runtime.scheduler import Scheduler
+from memory.memory_factory import build_memory_manager
+from memory.memory_manager import MemoryManager
+from scheduler.scheduler import Scheduler
 from runtime.sequence import Sequence, SequenceStatus
-from runtime.page_allocator import PageAllocator
-from runtime.tracer import RuntimeTracer
-from runtime.workload import (
+from memory.page_allocator import PageAllocator
+from tracing.tracer import RuntimeTracer
+from workloads.workload import (
     WORKLOAD_PROFILES,
     WorkloadProfile,
     run_synthetic_workload,

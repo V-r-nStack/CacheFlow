@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from runtime.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from runtime.sequence import Sequence
 
 

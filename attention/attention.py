@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
-from runtime.memory_backend import MemoryBackend
-from runtime.tracer import RuntimeTracer
+from memory.memory_backend import MemoryBackend
+from tracing.tracer import RuntimeTracer
 
 
 class CausalMultiHeadAttention(nn.Module):

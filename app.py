@@ -2,10 +2,10 @@ import torch
 import argparse
 from pathlib import Path
 
-from model.gpt import GPT
-from runtime.kv_cache import KVCacheManager
-from utils.profiler import ExecutionTimer, decode_throughput_tokens_per_second, format_mb
-from utils.tokenizer import GPT2Tokenizer
+from runtime.gpt import GPT
+from memory.kv_cache import KVCacheManager
+from tracing.profiler import ExecutionTimer, decode_throughput_tokens_per_second, format_mb
+from runtime.tokenizer import GPT2Tokenizer
 
 
 def _apply_repetition_penalty(logits, generated_token_ids, penalty):

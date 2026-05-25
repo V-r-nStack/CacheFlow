@@ -11,9 +11,9 @@ from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
-from runtime.block_table import BlockTable
-from runtime.page_allocator import PageAllocator
-from runtime.tracer import RuntimeTracer
+from memory.block_table import BlockTable
+from memory.page_allocator import PageAllocator
+from tracing.tracer import RuntimeTracer
 
 
 @dataclass(frozen=True)

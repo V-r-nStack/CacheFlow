@@ -7,9 +7,9 @@ from typing import Optional, Union
 
 import torch
 
-from runtime.memory_backend import ContiguousMemoryBackend, MemoryBackend
-from runtime.memory_manager import MemoryManager
-from runtime.page_allocator import PageAllocator
+from memory.memory_backend import ContiguousMemoryBackend, MemoryBackend
+from memory.memory_manager import MemoryManager
+from memory.page_allocator import PageAllocator
 
 
 def build_memory_manager(

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from runtime.memory_backend import (
+from memory.memory_backend import (
     ContiguousMemoryBackend,
     MemoryBackend,
     PagedMemoryBackend,
 )
-from runtime.page_allocator import PageAllocator
+from memory.page_allocator import PageAllocator
 
 
 class MemoryManager:
