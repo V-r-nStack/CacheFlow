@@ -68,8 +68,7 @@ token_secret.txt
 .cache/
 
 # Data / outputs
-data/
-outputs/
+
 
 # Compiled python
 *.pyc
@@ -77,3 +76,8 @@ outputs/
 
 # extra secrets 
 token_secret.txt
+
+#model weights
+*.pt
+*.pth
+weights/
